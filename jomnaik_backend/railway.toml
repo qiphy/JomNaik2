@@ -1,0 +1,7 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "bash start.sh"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
