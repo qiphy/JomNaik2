@@ -1,0 +1,53 @@
+name: Refresh offline GTFS timetable
+
+on:
+  schedule:
+    # Monday 03:15 UTC = Monday 11:15 in Malaysia (UTC+8).
+    - cron: '15 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download current official GTFS feeds
+        run: |
+          mkdir -p jomnaik_backend/data/gtfs jomnaik/assets
+          curl -fsSL 'https://api.data.gov.my/gtfs-static/prasarana?category=rapid-bus-kl' -o jomnaik_backend/data/gtfs/rapid-kl-bus.zip
+          curl -fsSL 'https://api.data.gov.my/gtfs-static/prasarana?category=rapid-bus-mrtfeeder' -o jomnaik/assets/gtfs_rapid_bus_mrtfeeder.zip
+          curl -fsSL 'https://api.data.gov.my/gtfs-static/prasarana?category=rapid-rail-kl' -o jomnaik_backend/data/gtfs/rapid-kl-rail.zip
+          curl -fsSL 'https://api.data.gov.my/gtfs-static/ktmb' -o jomnaik_backend/data/gtfs/ktmb.zip
+      - name: Rebuild the app timetable bundle
+        run: python3 jomnaik/tool/build_offline_router.py
+      - name: Write the update manifest
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          bundle = Path('jomnaik/assets/offline/raptor_klang_valley.json')
+          digest = hashlib.sha256(bundle.read_bytes()).hexdigest()[:16]
+          manifest = {
+              'version': f"{datetime.now(timezone.utc):%Y-%m-%d}-{digest}",
+              'downloadUrl': 'https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/jomnaik/assets/offline/raptor_klang_valley.json',
+          }
+          Path('jomnaik/assets/offline/raptor_manifest.json').write_text(
+              json.dumps(manifest, separators=(',', ':'))
+          )
+          PY
+      - name: Commit a changed timetable
+        run: |
+          git config user.name 'jomnaik-gtfs-bot'
+          git config user.email 'actions@github.com'
+          git add -f jomnaik/assets/offline/raptor_klang_valley.json jomnaik/assets/offline/raptor_manifest.json
+          git diff --cached --quiet || git commit -m 'chore: refresh offline GTFS timetable'
+          git push
