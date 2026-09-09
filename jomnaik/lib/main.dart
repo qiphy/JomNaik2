@@ -55,7 +55,15 @@ String get _backendBaseUrl {
   // A physical device needs the computer's LAN address, supplied through
   // GTFS_BACKEND_URL. These defaults cover the local web and Android emulator
   // development workflows without pointing the client at the unusable 0.0.0.0.
-  if (kIsWeb) return 'http://localhost:8000';
+  if (kIsWeb) {
+    final uri = Uri.base;
+    final localWebHost =
+        uri.host == 'localhost' || uri.host == '127.0.0.1' || uri.host == '::1';
+    // Keep the local development convention, but use the deployed site's
+    // origin by default so a web build does not call the visitor's localhost.
+    if (localWebHost) return 'http://localhost:8000';
+    if (uri.origin != 'null') return uri.origin;
+  }
   if (defaultTargetPlatform == TargetPlatform.android) {
     return 'http://10.0.2.2:8000';
   }
@@ -336,25 +344,87 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _prepareMapData() async {
-    final styleData = jsonDecode(
-      await rootBundle.loadString('assets/style/protomaps_light.json'),
-    );
-    if (styleData is! Map<String, dynamic>) {
-      throw const FormatException('Map style must be a JSON object.');
-    }
+    try {
+      if (kIsWeb) {
+        print(
+          '[JomNaik][web-map] Preparing OSM raster style '
+          '(origin=${Uri.base.origin}, path=${Uri.base.path})',
+        );
+        // Web deployments cannot reliably serve byte-range requests for the
+        // bundled PMTiles file. Use OSM's public raster tiles on web instead.
+        const webStyle = <String, dynamic>{
+          'version': 8,
+          'sources': <String, dynamic>{},
+          'layers': [
+            {
+              'id': 'web-background',
+              'type': 'background',
+              'paint': {'background-color': '#d6d6d6'},
+            },
+          ],
+        };
+        final encodedStyle = jsonEncode(webStyle);
+        print(
+          '[JomNaik][web-map] OSM style ready '
+          '(bytes=${encodedStyle.length}, tileTemplate='
+          'https://tile.openstreetmap.de/{z}/{x}/{y}.png; '
+          'raster source will be added after style load)',
+        );
+        if (mounted) {
+          setState(() => _dynamicStyleString = encodedStyle);
+          print('[JomNaik][web-map] OSM style assigned to widget state');
+        } else {
+          print(
+            '[JomNaik][web-map] Widget was unmounted before style assignment',
+          );
+        }
+        return;
+      }
 
-    final sources = styleData['sources'];
-    if (sources is! Map<String, dynamic> ||
-        sources['protomaps'] is! Map<String, dynamic>) {
-      throw const FormatException(
-        'Map style does not define a protomaps source.',
+      final styleData = jsonDecode(
+        await rootBundle.loadString('assets/style/protomaps_light.json'),
       );
-    }
-    (sources['protomaps'] as Map<String, dynamic>)['url'] =
-        await mapTilesSourceUrl();
+      if (styleData is! Map<String, dynamic>) {
+        throw const FormatException('Map style must be a JSON object.');
+      }
 
-    if (!mounted) return;
-    setState(() => _dynamicStyleString = jsonEncode(styleData));
+      final sources = styleData['sources'];
+      if (sources is! Map<String, dynamic> ||
+          sources['protomaps'] is! Map<String, dynamic>) {
+        throw const FormatException(
+          'Map style does not define a protomaps source.',
+        );
+      }
+      (sources['protomaps'] as Map<String, dynamic>)['url'] =
+          await mapTilesSourceUrl();
+
+      if (!mounted) return;
+      setState(() => _dynamicStyleString = jsonEncode(styleData));
+      print('[JomNaik][map] Native PMTiles style assigned');
+    } catch (error) {
+      debugPrint('Could not prepare offline map style: $error');
+      if (mounted) {
+        // Keep the map surface usable if a style edit or asset is malformed.
+        // The minimal style still exposes the same local PMTiles source.
+        try {
+          final fallback = jsonDecode(
+            await rootBundle.loadString('assets/style/minimal_style.json'),
+          );
+          if (fallback is Map<String, dynamic> &&
+              fallback['sources'] is Map<String, dynamic> &&
+              (fallback['sources'] as Map<String, dynamic>)['protomaps_offline']
+                  is Map<String, dynamic>) {
+            final sources = fallback['sources'] as Map<String, dynamic>;
+            final source = sources['protomaps_offline'] as Map<String, dynamic>;
+            source['url'] = await mapTilesSourceUrl();
+            setState(() => _dynamicStyleString = jsonEncode(fallback));
+          }
+        } catch (fallbackError) {
+          debugPrint('Could not prepare fallback map style: $fallbackError');
+        }
+        _showMessage('The offline map could not be loaded.');
+      }
+    }
   }
 
   bool _isSupportedCoordinate(double latitude, double longitude) =>
@@ -385,7 +455,7 @@ class _MapViewState extends State<MapView> {
     final requestVersion = ++_weatherRequestVersion;
     _weatherDebounce = Timer(const Duration(milliseconds: 700), () async {
       try {
-        debugPrint(
+        print(
           'Weather request for ${centre.latitude.toStringAsFixed(6)},${centre.longitude.toStringAsFixed(6)}',
         );
         final headers = await backendHeaders();
@@ -405,9 +475,7 @@ class _MapViewState extends State<MapView> {
             )
             .timeout(const Duration(seconds: 15));
         if (response.statusCode != 200) {
-          debugPrint(
-            'Weather API error (${response.statusCode}): ${response.body}',
-          );
+          print('Weather API error (${response.statusCode}): ${response.body}');
           return;
         }
         final contentType = response.headers['content-type'] ?? '';
@@ -1293,12 +1361,32 @@ class _MapViewState extends State<MapView> {
     try {
       await _mapController?.removeLayer('route_walk_layer');
     } catch (_) {}
+    for (final layerId in [
+      'route_ehailing_layer',
+      'route_ehailing',
+      'ehailing_layer',
+      'hail_layer',
+    ]) {
+      try {
+        await _mapController?.removeLayer(layerId);
+      } catch (_) {}
+    }
     try {
       await _mapController?.removeSource('route_transit_source');
     } catch (_) {}
     try {
       await _mapController?.removeSource('route_walk_source');
     } catch (_) {}
+    for (final sourceId in [
+      'route_ehailing_source',
+      'route_ehailing',
+      'ehailing_source',
+      'hail_source',
+    ]) {
+      try {
+        await _mapController?.removeSource(sourceId);
+      } catch (_) {}
+    }
     try {
       // All bundled rail features carry a route_id. This explicitly restores
       // the complete offline rail layer after the itinerary is closed.
@@ -1460,13 +1548,31 @@ class _MapViewState extends State<MapView> {
     int renderGeneration,
   ) async {
     // 1. Clear any old routing layers and sources to keep the canvas clean
-    try {
-      await _mapController?.removeLayer("route_transit_layer");
-      await _mapController?.removeLayer("route_walk_layer");
-      await _mapController?.removeSource("route_transit_source");
-      await _mapController?.removeSource("route_walk_source");
-    } catch (e) {
-      // Layers didn't exist yet, safe to ignore
+    for (final layerId in [
+      'route_transit_layer',
+      'route_walk_layer',
+      // Remove the legacy e-hailing layer so a hot reload cannot leave its
+      // stale straight-line geometry on the map.
+      'route_ehailing_layer',
+      'route_ehailing',
+      'ehailing_layer',
+      'hail_layer',
+    ]) {
+      try {
+        await _mapController?.removeLayer(layerId);
+      } catch (_) {}
+    }
+    for (final sourceId in [
+      'route_transit_source',
+      'route_walk_source',
+      'route_ehailing_source',
+      'route_ehailing',
+      'ehailing_source',
+      'hail_source',
+    ]) {
+      try {
+        await _mapController?.removeSource(sourceId);
+      } catch (_) {}
     }
 
     final walkFeatures = <Map<String, dynamic>>[];
@@ -1482,14 +1588,27 @@ class _MapViewState extends State<MapView> {
       if (leg['geometryQuality'] == 'unverified') continue;
       final mode = leg['mode'] as String? ?? 'WALK';
       final legCoordinates = <List<double>>[];
+      final isRoadLeg = _isRoadLegMode(mode);
+      // Transit geometry comes from GTFS. E-hailing geometry must come from a
+      // road router; using the leg endpoints here would draw a false straight
+      // line across buildings and restricted areas.
+      if (isRoadLeg) {
+        legCoordinates.addAll(await _fetchRoadGeometry(leg));
+      }
       final geometry = leg['legGeometry'];
-      if (geometry is Map && geometry['points'] is String) {
+      if (legCoordinates.isEmpty &&
+          !isRoadLeg &&
+          geometry is Map &&
+          geometry['points'] is String) {
         final points = geometry['points'] as String;
         final precision = geometry['precision'] is num
             ? (geometry['precision'] as num).toInt()
             : 5;
         legCoordinates.addAll(_decodePolyline(points, precision: precision));
-      } else if (geometry is Map && geometry['coordinates'] is List) {
+      } else if (legCoordinates.isEmpty &&
+          !isRoadLeg &&
+          geometry is Map &&
+          geometry['coordinates'] is List) {
         // GTFS shapes are supplied by the backend for generated BRT legs.
         // Preserve every alignment point instead of drawing a straight line
         // between the two station coordinates.
@@ -1504,14 +1623,10 @@ class _MapViewState extends State<MapView> {
             ]);
           }
         }
-      } else {
+      } else if (!isRoadLeg) {
         // Never draw a straight line for e-hailing. The backend must provide
         // a road-network geometry; if both road routers are unavailable, omit
         // the map segment instead of displaying an invalid route.
-        if (mode.toUpperCase() == 'HAIL' &&
-            leg['roadRoutingUnavailable'] == true) {
-          continue;
-        }
         // Direct fallback estimates do not claim to have road-level geometry.
         final from = leg['from'];
         final to = leg['to'];
@@ -1532,6 +1647,13 @@ class _MapViewState extends State<MapView> {
         }
       }
 
+      if (isRoadLeg && legCoordinates.isEmpty) {
+        print(
+          '[JomNaik][route] Omitted e-hailing line because road geometry '
+          'was unavailable',
+        );
+        continue;
+      }
       if (legCoordinates.isEmpty) continue;
       hasGeometry = true;
       routeCoordinates.addAll(legCoordinates);
@@ -1605,6 +1727,96 @@ class _MapViewState extends State<MapView> {
 
     if (_isCurrentItineraryRender(renderGeneration)) {
       await _focusItineraryOnMap(routeCoordinates);
+    }
+  }
+
+  bool _isRoadLegMode(String mode) {
+    final normalized = mode.toUpperCase().replaceAll(RegExp(r'[-_ ]'), '');
+    return normalized == 'HAIL' ||
+        normalized == 'EHAILING' ||
+        normalized == 'TAXI' ||
+        normalized == 'CAR';
+  }
+
+  Future<List<List<double>>> _fetchRoadGeometry(
+    Map<String, dynamic> leg,
+  ) async {
+    final from = leg['from'];
+    final to = leg['to'];
+    if (from is! Map ||
+        to is! Map ||
+        from['lat'] is! num ||
+        from['lon'] is! num ||
+        to['lat'] is! num ||
+        to['lon'] is! num) {
+      print(
+        '[JomNaik][route] E-hailing leg has invalid pickup/drop-off '
+        'coordinates',
+      );
+      return const [];
+    }
+
+    final fromLon = (from['lon'] as num).toDouble();
+    final fromLat = (from['lat'] as num).toDouble();
+    final toLon = (to['lon'] as num).toDouble();
+    final toLat = (to['lat'] as num).toDouble();
+    final uri = Uri.parse(
+      'https://router.project-osrm.org/route/v1/driving/'
+      '$fromLon,$fromLat;$toLon,$toLat'
+      '?overview=full&geometries=geojson&steps=false',
+    );
+    print('[JomNaik][route] Requesting OSM road geometry: $uri');
+    try {
+      final response = await _httpClient
+          .get(uri)
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        print(
+          '[JomNaik][route] OSM road router failed '
+          '(${response.statusCode}): ${response.body}',
+        );
+        return const [];
+      }
+      final decoded = jsonDecode(response.body);
+      final routes = decoded is Map ? decoded['routes'] : null;
+      final route = routes is List && routes.isNotEmpty ? routes.first : null;
+      dynamic coordinates;
+      if (route is Map) {
+        final geometry = route['geometry'];
+        coordinates = geometry is Map ? geometry['coordinates'] : null;
+      }
+      if (coordinates is! List) {
+        print('[JomNaik][route] OSM road router returned no geometry');
+        return const [];
+      }
+      final result = <List<double>>[];
+      for (final coordinate in coordinates) {
+        if (coordinate is List &&
+            coordinate.length >= 2 &&
+            coordinate[0] is num &&
+            coordinate[1] is num) {
+          result.add([
+            (coordinate[0] as num).toDouble(),
+            (coordinate[1] as num).toDouble(),
+          ]);
+        }
+      }
+      if (result.length < 2 ||
+          result.any((point) => !_isSupportedCoordinate(point[1], point[0]))) {
+        print(
+          '[JomNaik][route] Rejected OSM road geometry outside Klang Valley '
+          '(points=${result.length})',
+        );
+        return const [];
+      }
+      print(
+        '[JomNaik][route] SUCCESS OSM road geometry '
+        '(points=${result.length})',
+      );
+      return result;
+    } catch (error) {
+      print('[JomNaik][route] OSM road geometry request failed: $error');
+      return const [];
     }
   }
 
@@ -1685,6 +1897,27 @@ class _MapViewState extends State<MapView> {
   Future<void> _onMapCreated(MapLibreMapController controller) async {
     final generation = ++_mapGeneration;
     _mapController = controller;
+    print(
+      '[JomNaik][map] MapLibre controller created '
+      '(web=$kIsWeb, generation=$generation, styleReady=${_dynamicStyleString != null})',
+    );
+    print(
+      '[JomNaik][map] Initial camera target=3.1390,101.6868 zoom=12; '
+      'OSM tiles=tile.openstreetmap.de',
+    );
+    if (kIsWeb) {
+      debugPrint(
+        '[JomNaik][web-map] OSM map created; tile requests should target '
+        'https://tile.openstreetmap.de',
+      );
+    }
+    try {
+      await controller.getStyle();
+      print('[JomNaik][map] MapLibre style reported as loaded');
+    } catch (error) {
+      print('[JomNaik][map] MapLibre style failed to load: $error');
+    }
+
     await _loadAndRenderOfflineRailLines();
     if (!mounted || generation != _mapGeneration) return;
     await _loadAndRenderOfflineStops();
@@ -1703,6 +1936,50 @@ class _MapViewState extends State<MapView> {
     ) {
       _queryTappedFeature(point);
     });
+  }
+
+  Future<void> _addWebOpenStreetMapLayer(
+    MapLibreMapController controller,
+  ) async {
+    try {
+      const sourceId = 'web_openstreetmap_source';
+      const layerId = 'web_openstreetmap_layer';
+      try {
+        await controller.removeLayer(layerId);
+      } catch (_) {}
+      try {
+        await controller.removeSource(sourceId);
+      } catch (_) {}
+      await controller.addSource(
+        sourceId,
+        const RasterSourceProperties(
+          tiles: ['https://tile.openstreetmap.de/{z}/{x}/{y}.png'],
+          bounds: [_tileWest, _tileSouth, _tileEast, _tileNorth],
+          minzoom: 8,
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: '© OpenStreetMap contributors',
+        ),
+      );
+      await controller.addRasterLayer(
+        sourceId,
+        layerId,
+        const RasterLayerProperties(rasterOpacity: 1),
+      );
+      await controller.animateCamera(
+        CameraUpdate.newLatLngZoom(const LatLng(3.1390, 101.6868), 12),
+      );
+      print(
+        '[JomNaik][web-map] SUCCESS OSM raster source/layer added '
+        '(source=$sourceId, layer=$layerId, bounds=Klang Valley, '
+        'tileSize=256, minzoom=8, maxzoom=19, camera=3.1390/101.6868@12)',
+      );
+    } catch (error) {
+      print(
+        '[JomNaik][web-map] FAILURE OSM raster source/layer: '
+        '${error.runtimeType}: $error',
+      );
+    }
   }
 
   Future<void> _startLocationTracking() async {
@@ -3080,6 +3357,21 @@ class _MapViewState extends State<MapView> {
                         // keyed to the visible map centre, not device GPS.
                         trackCameraPosition: true,
                         onMapCreated: _onMapCreated,
+                        onStyleLoadedCallback: () {
+                          print(
+                            '[JomNaik][map] MapLibre onStyleLoaded '
+                            '(web=$kIsWeb, osm=$kIsWeb)',
+                          );
+                          if (kIsWeb && _mapController != null) {
+                            print(
+                              '[JomNaik][web-map] Starting OSM source/layer '
+                              'registration after style load',
+                            );
+                            unawaited(
+                              _addWebOpenStreetMapLayer(_mapController!),
+                            );
+                          }
+                        },
                         onMapLongClick: (_, coordinate) =>
                             _showLongPressedLocation(coordinate),
                         onCameraMove: _onCameraMove,

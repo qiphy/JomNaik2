@@ -16,17 +16,11 @@
   -->
   <base href="$FLUTTER_BASE_HREF">
   <!-- Inject MapLibre GL JS and CSS dependencies -->
-  <script src="https://unpkg.com/maplibre-gl@4.3.2/dist/maplibre-gl.js"></script>
+  <script
+    src="https://unpkg.com/maplibre-gl@4.3.2/dist/maplibre-gl.js"
+    onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/maplibre-gl@4.3.2/dist/maplibre-gl.js'"></script>
   <link href="https://unpkg.com/maplibre-gl@4.3.2/dist/maplibre-gl.css" rel="stylesheet" />
 
-  <!-- Inject PMTiles decoder for web support -->
-  <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
-
-  <script>
-    // Register the pmtiles:// protocol within the MapLibre engine
-    let protocol = new pmtiles.Protocol();
-    maplibregl.addProtocol("pmtiles", protocol.tile);
-  </script>
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="A new Flutter project.">

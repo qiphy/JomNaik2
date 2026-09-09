@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+import logging
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
@@ -19,6 +20,9 @@ from pydantic import BaseModel, Field
 from tomtom import TomTomTrafficError, fetch_congestion
 from realtime import fetch_vehicle_positions
 from weather import fetch_current_weather
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("jomnaik")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
@@ -52,8 +56,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in os.getenv("CORS_ORIGINS", "*").split(",")],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -117,6 +121,7 @@ async def _vehicle_positions() -> dict[str, Any]:
 
 @app.get("/api/health")
 async def health() -> dict[str, str]:
+    logger.info("GET /api/health success")
     return {"status": "ok", "routing": "on_device"}
 
 
@@ -200,6 +205,7 @@ async def realtime_vehicles(
 async def weather(
     lat: float = Query(ge=2.7, le=3.5), lon: float = Query(ge=101.2, le=102.1)
 ) -> dict[str, Any]:
+    logger.info("GET /api/weather/klang-valley lat=%s lon=%s", lat, lon)
     key = (round(lat, 2), round(lon, 2))
     cached = _weather_cache.get(key)
     if cached and time.monotonic() - cached[0] < 120:
@@ -208,8 +214,10 @@ async def weather(
         async with httpx.AsyncClient(timeout=12) as client:
             value = await fetch_current_weather(client, latitude=lat, longitude=lon)
     except (httpx.HTTPError, ValueError) as error:
+        logger.exception("Weather provider request failed")
         raise HTTPException(503, "Weather is temporarily unavailable") from error
     _weather_cache[key] = (time.monotonic(), value)
+    logger.info("GET /api/weather/klang-valley success")
     return value
 
 

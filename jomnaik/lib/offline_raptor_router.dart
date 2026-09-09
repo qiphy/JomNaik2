@@ -299,6 +299,10 @@ class OfflineRaptorRouter {
         );
       }
       final route = routes[ride.trip.routeId] as List? ?? const [];
+      final geometry = [
+        for (var n = ride.fromIndex; n <= ride.toIndex; n++)
+          _placeCoordinates(ride.trip.calls[n].stopId, stops),
+      ];
       legs.add({
         'mode': _mode(route.length > 2 ? route[2] as int : 3),
         'startTime': _iso(departure, ride.departure),
@@ -307,6 +311,10 @@ class OfflineRaptorRouter {
         'headsign': ride.trip.headsign,
         'from': _place(ride.fromStop, stops),
         'to': _place(ride.toStop, stops),
+        // The offline bundle has no road graph, but the ordered GTFS stops
+        // provide a useful transit alignment instead of a single endpoint
+        // segment.
+        'legGeometry': {'type': 'LineString', 'coordinates': geometry},
         'intermediateStops': [
           for (var n = ride.fromIndex + 1; n < ride.toIndex; n++)
             _place(ride.trip.calls[n].stopId, stops),
@@ -389,6 +397,14 @@ class OfflineRaptorRouter {
       'lon': stop?[2],
       'stopId': id,
     };
+  }
+
+  List<double> _placeCoordinates(String id, Map<String, dynamic> stops) {
+    final stop = stops[id] as List?;
+    return [
+      (stop?[2] as num?)?.toDouble() ?? 0,
+      (stop?[1] as num?)?.toDouble() ?? 0,
+    ];
   }
 
   String _iso(DateTime base, int seconds) => DateTime(
