@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 
@@ -12,6 +13,7 @@ import 'offline_bundle_store.dart';
 class OfflineRaptorRouter {
   static const _asset = 'assets/offline/raptor_klang_valley.json';
   Map<String, dynamic>? _data;
+  Map<String, String>? _railShapes; // Added to hold the encoded track curves
   List<_Trip>? _trips;
   final _store = OfflineBundleStore();
 
@@ -62,6 +64,8 @@ class OfflineRaptorRouter {
     String? toStopId,
   }) async {
     final data = await _load();
+    final shapes = await _loadShapes(); // Load geometry shapes
+
     final trips = _trips ??= (data['trips'] as List)
         .whereType<List>()
         .map(_Trip.fromRaw)
@@ -114,6 +118,7 @@ class OfflineRaptorRouter {
     }
     return _toItinerary(
       data: data,
+      shapes: shapes,
       departure: when,
       startSeconds: startSeconds,
       fromLat: fromLat,
@@ -131,6 +136,19 @@ class OfflineRaptorRouter {
         await _store.readBundle() ?? await rootBundle.loadString(_asset);
     _data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
     return _data!;
+  }
+
+  /// Loads the encoded polylines for the rail shapes
+  Future<Map<String, String>> _loadShapes() async {
+    if (_railShapes != null) return _railShapes!;
+    try {
+      final raw = await rootBundle.loadString('assets/transit/rail_shapes.json');
+      final decoded = jsonDecode(raw) as Map;
+      _railShapes = decoded.map((key, value) => MapEntry(key.toString(), value.toString()));
+    } catch (e) {
+      _railShapes = {};
+    }
+    return _railShapes!;
   }
 
   List<_NearbyStop> _nearby(
@@ -176,7 +194,12 @@ class OfflineRaptorRouter {
       final label = previous[call.stopId];
       if (label != null) {
         final departure = trip.nextDeparture(index, label.arrival);
+
+        // If the next departure is more than 45 minutes away, do not wait on the platform
+        final isWaitReasonable = departure != null && (departure - label.arrival) <= 2700;
+
         if (departure != null &&
+            isWaitReasonable &&
             (boarding == null || departure < boarding.departure)) {
           boarding = _Boarding(index, departure, label);
         }
@@ -255,6 +278,7 @@ class OfflineRaptorRouter {
 
   Map<String, dynamic> _toItinerary({
     required Map<String, dynamic> data,
+    required Map<String, String> shapes, // Added shapes parameter
     required DateTime departure,
     required int startSeconds,
     required double fromLat,
@@ -267,6 +291,7 @@ class OfflineRaptorRouter {
     final stops = Map<String, dynamic>.from(data['stops'] as Map);
     final routes = Map<String, dynamic>.from(data['routes'] as Map);
     final legs = <Map<String, dynamic>>[];
+
     if (label.initialWalkSeconds > 0) {
       legs.add(
         _walkLeg(
@@ -281,6 +306,7 @@ class OfflineRaptorRouter {
         ),
       );
     }
+
     for (var i = 0; i < label.rides.length; i++) {
       final ride = label.rides[i];
       if (i > 0 && label.rides[i - 1].toStop != ride.fromStop) {
@@ -299,6 +325,8 @@ class OfflineRaptorRouter {
         );
       }
       final route = routes[ride.trip.routeId] as List? ?? const [];
+      final polyline = shapes[ride.trip.routeId]; // Lookup the shape using GTFS route ID
+
       legs.add({
         'mode': _mode(route.length > 2 ? route[2] as int : 3),
         'startTime': _iso(departure, ride.departure),
@@ -311,16 +339,24 @@ class OfflineRaptorRouter {
           for (var n = ride.fromIndex + 1; n < ride.toIndex; n++)
             _place(ride.trip.calls[n].stopId, stops),
         ],
+        // --- INJECT CURVED GEOMETRY HERE ---
+        if (polyline != null)
+          'legGeometry': {
+            'points': polyline,
+            'precision': 5,
+          },
       });
     }
+
     final lastArrival = label.rides.last.arrival;
     final last = label.rides.last.toStop;
     final finalWalk = _distance(
-      (stops[last] as List)[1],
-      (stops[last] as List)[2],
+      ((stops[last] as List)[1] as num).toDouble(),
+      ((stops[last] as List)[2] as num).toDouble(),
       toLat,
       toLon,
     );
+
     if (finalWalk > 20) {
       legs.add(
         _walkLeg(
@@ -338,10 +374,12 @@ class OfflineRaptorRouter {
         ),
       );
     }
+
     final transitModes = legs
         .where((leg) => leg['mode'] != 'WALK')
         .map((leg) => leg['mode'])
         .toSet();
+
     return {
       'itineraries': [
         {
@@ -396,12 +434,14 @@ class OfflineRaptorRouter {
     base.month,
     base.day,
   ).add(Duration(seconds: seconds)).toIso8601String();
+
   String _mode(int type) => switch (type) {
     0 => 'TRAM',
     1 => 'SUBWAY',
     2 => 'RAIL',
     _ => 'BUS',
   };
+
   double _distance(double aLat, double aLon, double bLat, double bLon) {
     final dLat = (bLat - aLat) * math.pi / 180,
         dLon = (bLon - aLon) * math.pi / 180;
@@ -458,6 +498,7 @@ class _Trip {
   final String id, routeId, serviceId, headsign;
   final List<_Call> calls;
   final List<List<int>> frequencies;
+
   int? nextDeparture(int index, int ready) {
     final base = calls[index].departure;
     if (frequencies.isEmpty) return base >= ready ? base : null;

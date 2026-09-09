@@ -84,7 +84,7 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                     const _PrivacySection(
                       title: 'Service providers',
                       body:
-                          'Routing and operational data are processed by the JomNaik backend on Databricks. Weather requests use Open-Meteo, and traffic requests use TomTom when traffic information is shown. Opening an e-hailing app takes you to that provider, whose privacy terms apply separately.',
+                          'Routing and operational data are processed by the JomNaik backend on Railway. Weather requests use Open-Meteo, and traffic requests use TomTom when traffic information is shown. Opening an e-hailing app takes you to that provider, whose privacy terms apply separately.',
                     ),
                     const _PrivacySection(
                       title: 'Your choices',
