@@ -1588,16 +1588,15 @@ class _MapViewState extends State<MapView> {
       if (leg['geometryQuality'] == 'unverified') continue;
       final mode = leg['mode'] as String? ?? 'WALK';
       final legCoordinates = <List<double>>[];
-      final isRoadLeg = _isRoadLegMode(mode);
-      // Transit geometry comes from GTFS. E-hailing geometry must come from a
-      // road router; using the leg endpoints here would draw a false straight
-      // line across buildings and restricted areas.
-      if (isRoadLeg) {
+      final isStreetLeg = _isStreetLegMode(mode);
+      // Transit geometry comes from GTFS. Walking and e-hailing geometry must
+      // follow the street network between the user's actual coordinates.
+      if (isStreetLeg) {
         legCoordinates.addAll(await _fetchRoadGeometry(leg));
       }
       final geometry = leg['legGeometry'];
       if (legCoordinates.isEmpty &&
-          !isRoadLeg &&
+          !isStreetLeg &&
           geometry is Map &&
           geometry['points'] is String) {
         final points = geometry['points'] as String;
@@ -1606,7 +1605,7 @@ class _MapViewState extends State<MapView> {
             : 5;
         legCoordinates.addAll(_decodePolyline(points, precision: precision));
       } else if (legCoordinates.isEmpty &&
-          !isRoadLeg &&
+          !isStreetLeg &&
           geometry is Map &&
           geometry['coordinates'] is List) {
         // GTFS shapes are supplied by the backend for generated BRT legs.
@@ -1623,34 +1622,12 @@ class _MapViewState extends State<MapView> {
             ]);
           }
         }
-      } else if (!isRoadLeg) {
-        // Never draw a straight line for e-hailing. The backend must provide
-        // a road-network geometry; if both road routers are unavailable, omit
-        // the map segment instead of displaying an invalid route.
-        // Direct fallback estimates do not claim to have road-level geometry.
-        final from = leg['from'];
-        final to = leg['to'];
-        if (from is Map &&
-            to is Map &&
-            from['lat'] is num &&
-            from['lon'] is num &&
-            to['lat'] is num &&
-            to['lon'] is num) {
-          legCoordinates.add([
-            (from['lon'] as num).toDouble(),
-            (from['lat'] as num).toDouble(),
-          ]);
-          legCoordinates.add([
-            (to['lon'] as num).toDouble(),
-            (to['lat'] as num).toDouble(),
-          ]);
-        }
       }
 
-      if (isRoadLeg && legCoordinates.isEmpty) {
+      if (isStreetLeg && legCoordinates.isEmpty) {
         print(
-          '[JomNaik][route] Omitted e-hailing line because road geometry '
-          'was unavailable',
+          '[JomNaik][route] Omitted ${mode.toUpperCase()} line because road '
+          'geometry was unavailable',
         );
         continue;
       }
@@ -1730,9 +1707,10 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  bool _isRoadLegMode(String mode) {
+  bool _isStreetLegMode(String mode) {
     final normalized = mode.toUpperCase().replaceAll(RegExp(r'[-_ ]'), '');
-    return normalized == 'HAIL' ||
+    return normalized == 'WALK' ||
+        normalized == 'HAIL' ||
         normalized == 'EHAILING' ||
         normalized == 'TAXI' ||
         normalized == 'CAR';
@@ -1749,10 +1727,7 @@ class _MapViewState extends State<MapView> {
         from['lon'] is! num ||
         to['lat'] is! num ||
         to['lon'] is! num) {
-      print(
-        '[JomNaik][route] E-hailing leg has invalid pickup/drop-off '
-        'coordinates',
-      );
+      print('[JomNaik][route] Street leg has invalid from/to coordinates');
       return const [];
     }
 
@@ -1760,12 +1735,23 @@ class _MapViewState extends State<MapView> {
     final fromLat = (from['lat'] as num).toDouble();
     final toLon = (to['lon'] as num).toDouble();
     final toLat = (to['lat'] as num).toDouble();
+    if (!_isSupportedCoordinate(fromLat, fromLon) ||
+        !_isSupportedCoordinate(toLat, toLon)) {
+      print(
+        '[JomNaik][route] Rejected street leg outside Klang Valley '
+        '(from=$fromLat,$fromLon to=$toLat,$toLon)',
+      );
+      return const [];
+    }
     final uri = Uri.parse(
       'https://router.project-osrm.org/route/v1/driving/'
       '$fromLon,$fromLat;$toLon,$toLat'
       '?overview=full&geometries=geojson&steps=false',
     );
-    print('[JomNaik][route] Requesting OSM road geometry: $uri');
+    print(
+      '[JomNaik][route] Requesting OSM street geometry '
+      '(${_isStreetLegMode(leg['mode']?.toString() ?? '') ? leg['mode'] : 'unknown'}): $uri',
+    );
     try {
       final response = await _httpClient
           .get(uri)
