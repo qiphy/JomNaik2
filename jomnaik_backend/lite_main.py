@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from tomtom import TomTomTrafficError, fetch_congestion
 from realtime import fetch_vehicle_positions
 from weather import fetch_current_weather
+from gtfs_schedule import departures_for_stop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jomnaik")
@@ -27,11 +28,19 @@ logger = logging.getLogger("jomnaik")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "")
 _weather_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _traffic_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _offline_manifest_cache: tuple[float, dict[str, str]] | None = None
 _vehicle_cache: tuple[float, dict[str, Any]] | None = None
+_places_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _tomtom_api_key() -> str:
+    """Read the current deployment value instead of freezing import-time config."""
+    value = os.getenv("TOMTOM_API_KEY", "").strip()
+    if value.lower() in {"replace_me", "changeme", "your_api_key"}:
+        return ""
+    return value
 
 
 class PresenceReport(BaseModel):
@@ -120,9 +129,13 @@ async def _vehicle_positions() -> dict[str, Any]:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str]:
+async def health() -> dict[str, str | bool]:
     logger.info("GET /api/health success")
-    return {"status": "ok", "routing": "on_device"}
+    return {
+        "status": "ok",
+        "routing": "on_device",
+        "trafficConfigured": bool(_tomtom_api_key()),
+    }
 
 
 @app.get("/api/offline/manifest")
@@ -159,6 +172,90 @@ async def offline_manifest() -> dict[str, str]:
     if not url or not version:
         raise HTTPException(404, "No published offline timetable bundle")
     return {"version": version, "downloadUrl": url}
+
+
+@app.get("/api/places/search")
+async def places_search(
+    q: str = Query(min_length=2, max_length=200),
+) -> dict[str, Any]:
+    """Search any mapped place in Klang Valley through Nominatim."""
+    query = " ".join(q.split())
+    cache_key = query.casefold()
+    cached = _places_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < 60:
+        return {"places": cached[1], "source": "Nominatim"}
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": query,
+                    "format": "jsonv2",
+                    "addressdetails": "1",
+                    "limit": "12",
+                    "countrycodes": "my",
+                    "viewbox": "101.2,3.45,101.95,2.7",
+                    "bounded": "1",
+                },
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "JomNaik/1.0 (Klang Valley transit app)",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as error:
+        logger.warning("Nominatim place search failed: %s", error)
+        raise HTTPException(503, "Place search is temporarily unavailable") from error
+
+    places: list[dict[str, Any]] = []
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                lat = float(item["lat"])
+                lon = float(item["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (2.7 <= lat <= 3.45 and 101.2 <= lon <= 101.95):
+                continue
+            display_name = str(item.get("display_name") or query)
+            name = str(item.get("name") or display_name.split(",", 1)[0])
+            places.append(
+                {
+                    "name": name,
+                    "address": display_name,
+                    "lat": lat,
+                    "lon": lon,
+                    "osm_type": item.get("osm_type"),
+                    "osm_id": item.get("osm_id"),
+                }
+            )
+    _places_cache[cache_key] = (time.monotonic(), places)
+    return {"places": places, "source": "Nominatim"}
+
+
+@app.get("/api/gtfs/stops/{stop_id}/departures")
+async def gtfs_departures(
+    stop_id: str,
+    limit: int = Query(default=6, ge=1, le=20),
+) -> dict[str, Any]:
+    """Return scheduled rail and bus departures for a GTFS stop."""
+    try:
+        value = departures_for_stop(stop_id, limit=limit)
+    except FileNotFoundError as error:
+        logger.error("GTFS timetable bundle is missing: %s", error)
+        raise HTTPException(503, "GTFS timetable is not configured") from error
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        logger.exception("GTFS timetable could not be read")
+        raise HTTPException(503, "GTFS timetable is temporarily unavailable") from error
+    logger.info(
+        "GET /api/gtfs/stops/%s/departures returned %d departures",
+        stop_id,
+        len(value["departures"]),
+    )
+    return value
 
 
 @app.get("/api/route")
@@ -225,7 +322,11 @@ async def weather(
 async def traffic(
     lat: float = Query(ge=2.7, le=3.5), lon: float = Query(ge=101.2, le=102.1)
 ) -> dict[str, Any]:
-    if not TOMTOM_API_KEY:
+    tomtom_api_key = _tomtom_api_key()
+    if not tomtom_api_key:
+        logger.warning(
+            "GET /api/traffic/congestion unavailable: TOMTOM_API_KEY is not configured"
+        )
         raise HTTPException(503, "Traffic is not configured")
     key = (round(lat, 3), round(lon, 3))
     cached = _traffic_cache.get(key)
@@ -233,10 +334,26 @@ async def traffic(
         return cached[1]
     try:
         async with httpx.AsyncClient(timeout=12) as client:
-            value = await fetch_congestion(client, api_key=TOMTOM_API_KEY, latitude=lat, longitude=lon)
+            value = await fetch_congestion(
+                client,
+                api_key=tomtom_api_key,
+                latitude=lat,
+                longitude=lon,
+            )
     except TomTomTrafficError as error:
+        logger.warning(
+            "GET /api/traffic/congestion provider failure at %.6f,%.6f: %s",
+            lat,
+            lon,
+            error,
+        )
         raise HTTPException(503, str(error)) from error
     _traffic_cache[key] = (time.monotonic(), value)
+    logger.info(
+        "GET /api/traffic/congestion success at %.6f,%.6f",
+        lat,
+        lon,
+    )
     return value
 
 

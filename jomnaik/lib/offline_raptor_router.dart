@@ -11,6 +11,7 @@ import 'offline_bundle_store.dart';
 /// results accordingly.
 class OfflineRaptorRouter {
   static const _asset = 'assets/offline/raptor_klang_valley.json';
+  static const _maximumTransitWaitSeconds = 10 * 60;
   Map<String, dynamic>? _data;
   List<_Trip>? _trips;
   final _store = OfflineBundleStore();
@@ -87,8 +88,7 @@ class OfflineRaptorRouter {
     }
     _applyTransfers(labels, data);
 
-    _Label? best;
-    String? bestDestination;
+    final candidates = <({_Label label, String destination})>[];
     for (var round = 0; round < 4; round++) {
       final next = Map<String, _Label>.from(labels);
       for (final trip in trips) {
@@ -100,29 +100,84 @@ class OfflineRaptorRouter {
         final label = next[stop.id];
         if (label == null) continue;
         final arrival = label.arrival + stop.walkSeconds;
-        if (best == null || arrival < best.arrival) {
-          best = label.copyWith(arrival: arrival);
-          bestDestination = stop.id;
-        }
+        candidates.add((
+          label: label.copyWith(arrival: arrival),
+          destination: stop.id,
+        ));
       }
       labels
         ..clear()
         ..addAll(next);
     }
-    if (best == null || bestDestination == null || best.rides.isEmpty) {
+    final uniqueCandidates = <String, ({_Label label, String destination})>{};
+    for (final candidate in candidates) {
+      if (candidate.label.rides.isEmpty) continue;
+      final signature = [
+        candidate.destination,
+        for (final ride in candidate.label.rides) ride.trip.routeId,
+      ].join('|');
+      final existing = uniqueCandidates[signature];
+      if (existing == null ||
+          candidate.label.arrival < existing.label.arrival) {
+        uniqueCandidates[signature] = candidate;
+      }
+    }
+    final transitCandidates = uniqueCandidates.values.toList()
+      ..sort(
+        (left, right) => left.label.arrival.compareTo(right.label.arrival),
+      );
+    int transferCount(({_Label label, String destination}) candidate) {
+      final routeIds = <String>{};
+      for (final ride in candidate.label.rides) {
+        routeIds.add(ride.trip.routeId);
+      }
+      return math.max(0, routeIds.length - 1);
+    }
+
+    if (transitCandidates.isEmpty) {
       return null;
     }
-    return _toItinerary(
-      data: data,
-      departure: when,
-      startSeconds: startSeconds,
-      fromLat: fromLat,
-      fromLon: fromLon,
-      toLat: toLat,
-      toLon: toLon,
-      destinationStop: bestDestination,
-      label: best,
-    );
+    final itineraries = <Map<String, dynamic>>[];
+    // Keep several genuinely different route patterns. The client ranks them
+    // by walking burden, then transfers and duration, instead of presenting
+    // only one low-transfer route and one multi-transfer route.
+    for (final candidate in transitCandidates.take(8)) {
+      final route = _toItinerary(
+        data: data,
+        departure: when,
+        startSeconds: startSeconds,
+        fromLat: fromLat,
+        fromLon: fromLon,
+        toLat: toLat,
+        toLon: toLon,
+        destinationStop: candidate.destination,
+        label: candidate.label,
+      );
+      itineraries.addAll(
+        (route['itineraries'] as List).whereType<Map<String, dynamic>>(),
+      );
+    }
+    itineraries.sort((left, right) {
+      final walkingComparison = ((left['walkingSeconds'] as num?)?.toInt() ??
+              1 << 30)
+          .compareTo(
+            (right['walkingSeconds'] as num?)?.toInt() ?? 1 << 30,
+          );
+      if (walkingComparison != 0) return walkingComparison;
+      final transferComparison = ((left['transferCount'] as num?)?.toInt() ??
+              1 << 30)
+          .compareTo(
+            (right['transferCount'] as num?)?.toInt() ?? 1 << 30,
+          );
+      if (transferComparison != 0) return transferComparison;
+      return ((left['duration'] as num?)?.toInt() ?? 1 << 30).compareTo(
+        (right['duration'] as num?)?.toInt() ?? 1 << 30,
+      );
+    });
+    return {
+      'itineraries': itineraries.take(6).toList(),
+      'offlineRouting': true,
+    };
   }
 
   Future<Map<String, dynamic>> _load() async {
@@ -177,6 +232,7 @@ class OfflineRaptorRouter {
       if (label != null) {
         final departure = trip.nextDeparture(index, label.arrival);
         if (departure != null &&
+            departure - label.arrival <= _maximumTransitWaitSeconds &&
             (boarding == null || departure < boarding.departure)) {
           boarding = _Boarding(index, departure, label);
         }
@@ -329,7 +385,7 @@ class OfflineRaptorRouter {
       toLat,
       toLon,
     );
-    if (finalWalk > 20) {
+    if (finalWalk <= 1000 && finalWalk > 20) {
       legs.add(
         _walkLeg(
           departure,
@@ -345,18 +401,52 @@ class OfflineRaptorRouter {
           fromStop: last,
         ),
       );
+    } else if (finalWalk > 1000) {
+      final hailSeconds = math.max(300, (finalWalk / 9.7).round() + 180);
+      legs.add({
+        'mode': 'HAIL',
+        'startTime': _iso(departure, lastArrival),
+        'endTime': _iso(departure, lastArrival + hailSeconds),
+        'routeShortName': 'E-hailing',
+        'paymentMethod': 'Pay in the e-hailing app',
+        'from': _place(last, stops),
+        'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
+        'isLastMile': true,
+      });
     }
     final transitModes = legs
         .where((leg) => leg['mode'] != 'WALK')
         .map((leg) => leg['mode'])
         .toSet();
+    final transitRouteIds = label.rides
+        .map((ride) => ride.trip.routeId)
+        .toSet();
+    final walkingSeconds = legs
+        .where((leg) => leg['mode'] == 'WALK')
+        .fold<int>(0, (total, leg) {
+          final start = DateTime.tryParse(leg['startTime']?.toString() ?? '');
+          final end = DateTime.tryParse(leg['endTime']?.toString() ?? '');
+          return total +
+              (start != null && end != null
+                  ? end.difference(start).inSeconds
+                  : 0);
+        });
     return {
       'itineraries': [
         {
-          'duration': label.arrival - startSeconds,
+          'duration': legs.isEmpty
+              ? label.arrival - startSeconds
+              : (DateTime.parse(legs.last['endTime'] as String)
+                    .difference(
+                      DateTime.parse(legs.first['startTime'] as String),
+                    )
+                    .inSeconds),
           'routeCategory': transitModes.contains('BUS') ? 'bus' : 'rail',
+          'transferCount': math.max(0, transitRouteIds.length - 1),
+          'walkingSeconds': walkingSeconds,
           'fallbackMessage':
-              'Offline timetable route — live delays, traffic, weather, and crowd reports are unavailable.',
+              'Offline timetable route — last-mile walking or e-hailing is '
+              'included when the destination is not practical by bus.',
           'legs': legs,
         },
       ],

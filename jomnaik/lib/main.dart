@@ -224,7 +224,7 @@ class _MapViewState extends State<MapView> {
   final Map<String, _TimedCache<List<StopDeparture>>> _departureCache = {};
   final Map<String, _TimedCache<List<StationIncident>>> _incidentCache = {};
   final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
-  bool _isSearchOpen = false;
+  bool _isSearchOpen = true;
   final Set<String> _submittedIncidentKeys = <String>{};
   List<_TransitStation> _railStations = const [];
   Map<String, _TransitStop> _transitStopsById = const {};
@@ -336,7 +336,7 @@ class _MapViewState extends State<MapView> {
   void _selectTab(int index) {
     setState(() {
       _selectedTab = index;
-      if (index != 0) _isSearchOpen = false;
+      if (index == 0) _isSearchOpen = true;
     });
     if (index == 0 && _lastKnownPosition != null) {
       unawaited(_askForNearbyStationChoice(_lastKnownPosition!));
@@ -345,42 +345,6 @@ class _MapViewState extends State<MapView> {
 
   Future<void> _prepareMapData() async {
     try {
-      if (kIsWeb) {
-        print(
-          '[JomNaik][web-map] Preparing OSM raster style '
-          '(origin=${Uri.base.origin}, path=${Uri.base.path})',
-        );
-        // Web deployments cannot reliably serve byte-range requests for the
-        // bundled PMTiles file. Use OSM's public raster tiles on web instead.
-        const webStyle = <String, dynamic>{
-          'version': 8,
-          'sources': <String, dynamic>{},
-          'layers': [
-            {
-              'id': 'web-background',
-              'type': 'background',
-              'paint': {'background-color': '#d6d6d6'},
-            },
-          ],
-        };
-        final encodedStyle = jsonEncode(webStyle);
-        print(
-          '[JomNaik][web-map] OSM style ready '
-          '(bytes=${encodedStyle.length}, tileTemplate='
-          'https://tile.openstreetmap.de/{z}/{x}/{y}.png; '
-          'raster source will be added after style load)',
-        );
-        if (mounted) {
-          setState(() => _dynamicStyleString = encodedStyle);
-          print('[JomNaik][web-map] OSM style assigned to widget state');
-        } else {
-          print(
-            '[JomNaik][web-map] Widget was unmounted before style assignment',
-          );
-        }
-        return;
-      }
-
       final styleData = jsonDecode(
         await rootBundle.loadString('assets/style/protomaps_light.json'),
       );
@@ -400,7 +364,7 @@ class _MapViewState extends State<MapView> {
 
       if (!mounted) return;
       setState(() => _dynamicStyleString = jsonEncode(styleData));
-      print('[JomNaik][map] Native PMTiles style assigned');
+      print('[JomNaik][map] Protomaps PMTiles style assigned');
     } catch (error) {
       debugPrint('Could not prepare offline map style: $error');
       if (mounted) {
@@ -738,10 +702,20 @@ class _MapViewState extends State<MapView> {
       _showUnsupportedZone();
       return;
     }
-    if (_lastKnownPosition == null) await _startLocationTracking();
-    if (!mounted) return;
-    final origin = _lastKnownPosition;
-    final selectedStart = origin == null ? await _askForStartLocation() : null;
+    final useCurrentLocation = await _chooseCurrentOrManualStart();
+    if (useCurrentLocation == null) return;
+    Position? origin;
+    PlaceSearchResult? selectedStart;
+    if (useCurrentLocation) {
+      await _startLocationTracking();
+      origin = _lastKnownPosition;
+      if (origin == null) {
+        _showMessage('Could not get your current location.');
+        return;
+      }
+    } else {
+      selectedStart = await _askForStartLocation();
+    }
     if (origin == null && selectedStart == null) return;
     final originLat = origin?.latitude ?? selectedStart!.lat;
     final originLon = origin?.longitude ?? selectedStart!.lon;
@@ -758,6 +732,58 @@ class _MapViewState extends State<MapView> {
       toStopId: destination.stopId,
     );
     await _showRouteChoices(routeData);
+  }
+
+  Future<bool?> _chooseCurrentOrManualStart() {
+    return showModalBottomSheet<bool>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Choose your starting point',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: () => Navigator.of(context).pop(true),
+                icon: const Icon(Icons.my_location),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
+                ),
+                label: const Text(
+                  'Use current location',
+                  style: TextStyle(fontSize: 18),
+                ),
+              ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).pop(false),
+                icon: const Icon(Icons.search),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
+                ),
+                label: const Text(
+                  'Enter a location',
+                  style: TextStyle(fontSize: 18),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<PlaceSearchResult?> _askForStartLocation() async {
@@ -965,11 +991,27 @@ class _MapViewState extends State<MapView> {
         .toList();
     // Duration can exclude waiting time in a timetable view. Prefer the
     // earliest usable public-transport departure rather than a journey that
-    // starts later. Keep the complete e-hailing fallback after transit.
+    // starts later, while keeping short walking and direct e-hailing options
+    // ahead of a timetable that departs much later.
     itineraries.sort((left, right) {
+      final walkingComparison =
+          ((left['walkingSeconds'] as num?)?.toInt() ?? 1 << 30).compareTo(
+            (right['walkingSeconds'] as num?)?.toInt() ?? 1 << 30,
+          );
+      if (walkingComparison != 0) return walkingComparison;
+      int priority(Map<String, dynamic> itinerary) {
+        if (itinerary['routeCategory']?.toString() == 'ehailing') return 2;
+        if (itinerary['routeCategory']?.toString() == 'walking') return 0;
+        final transfers = (itinerary['transferCount'] as num?)?.toInt() ?? 0;
+        if (transfers <= 1) return 0;
+        return 1;
+      }
+
+      final priorityComparison = priority(left).compareTo(priority(right));
+      if (priorityComparison != 0) return priorityComparison;
       final leftIsFullHail = left['routeCategory']?.toString() == 'ehailing';
       final rightIsFullHail = right['routeCategory']?.toString() == 'ehailing';
-      if (leftIsFullHail != rightIsFullHail) return leftIsFullHail ? 1 : -1;
+      if (leftIsFullHail != rightIsFullHail) return leftIsFullHail ? -1 : 1;
       DateTime departure(Map<String, dynamic> itinerary) {
         final legs = _itineraryLegs(itinerary);
         final value = legs.isEmpty ? null : legs.first['startTime'];
@@ -1063,7 +1105,7 @@ class _MapViewState extends State<MapView> {
     _placeSearchDebounce?.cancel();
     if (mounted) {
       setState(() {
-        _isSearchOpen = false;
+        _isSearchOpen = true;
         _placeSearchRequestId++;
         _placeSearchController.clear();
         _selectedPlace = null;
@@ -1463,6 +1505,18 @@ class _MapViewState extends State<MapView> {
 
       final itineraries = responseData['itineraries'] as List<dynamic>;
       if (itineraries.isEmpty) {
+        final alternatives = _addDirectModeAlternatives(
+          responseData,
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+        );
+        final alternativeItineraries = alternatives['itineraries'];
+        if (alternativeItineraries is List &&
+            alternativeItineraries.isNotEmpty) {
+          return alternatives;
+        }
         final fallbackMessage = responseData['fallbackMessage'];
         _showMessage(
           fallbackMessage is String && fallbackMessage.isNotEmpty
@@ -1478,7 +1532,13 @@ class _MapViewState extends State<MapView> {
         return null;
       }
 
-      return responseData;
+      return _addDirectModeAlternatives(
+        responseData,
+        fromLat: fromLat,
+        fromLon: fromLon,
+        toLat: toLat,
+        toLon: toLon,
+      );
     } on FormatException catch (error) {
       _showMessage('The route service returned invalid JSON.');
       debugPrint('Invalid route JSON: $error');
@@ -1519,6 +1579,18 @@ class _MapViewState extends State<MapView> {
     String? fromStopId,
     String? toStopId,
   }) async {
+    final directEhailing = _offlineEhailingItinerary(
+      fromLat: fromLat,
+      fromLon: fromLon,
+      toLat: toLat,
+      toLon: toLon,
+    );
+    final directWalking = _offlineWalkingItinerary(
+      fromLat: fromLat,
+      fromLon: fromLon,
+      toLat: toLat,
+      toLon: toLon,
+    );
     try {
       final result = await _offlineRaptorRouter.plan(
         fromLat: fromLat,
@@ -1532,21 +1604,139 @@ class _MapViewState extends State<MapView> {
         _showMessage(
           'Using offline timetable routing. Live updates are unavailable.',
         );
-        return result;
+        return _addDirectModeAlternatives(
+          result,
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+        );
       }
     } catch (error) {
       debugPrint('Offline RAPTOR route error: $error');
     }
     _showMessage(
-      'No offline timetable route is available for these locations.',
+      'Using direct e-hailing estimate. Live updates are unavailable.',
     );
-    return null;
+    return {
+      'itineraries': [if (directWalking != null) directWalking, directEhailing],
+      'offlineRouting': true,
+    };
+  }
+
+  Map<String, dynamic> _addDirectModeAlternatives(
+    Map<String, dynamic> routeData, {
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+  }) {
+    final existing = routeData['itineraries'];
+    if (existing is! List) return routeData;
+
+    final itineraries = List<dynamic>.from(existing);
+    final hasCategory = (String category) => itineraries.any(
+      (itinerary) =>
+          itinerary is Map &&
+          itinerary['routeCategory']?.toString() == category,
+    );
+
+    if (!hasCategory('ehailing')) {
+      itineraries.add(
+        _offlineEhailingItinerary(
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+        ),
+      );
+    }
+    final walking = _offlineWalkingItinerary(
+      fromLat: fromLat,
+      fromLon: fromLon,
+      toLat: toLat,
+      toLon: toLon,
+    );
+    if (walking != null && !hasCategory('walking')) {
+      itineraries.add(walking);
+    }
+
+    return {...routeData, 'itineraries': itineraries};
+  }
+
+  Map<String, dynamic>? _offlineWalkingItinerary({
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+  }) {
+    final distanceMeters = Geolocator.distanceBetween(
+      fromLat,
+      fromLon,
+      toLat,
+      toLon,
+    );
+    if (distanceMeters > 1000) return null;
+    final walkingSeconds = math.max(60, (distanceMeters / 1.35).round());
+    final start = DateTime.now();
+    final end = start.add(Duration(seconds: walkingSeconds));
+    return {
+      'duration': walkingSeconds,
+      'routeCategory': 'walking',
+      'optionMessage': 'Direct walking option for journeys up to 1 km.',
+      'legs': [
+        {
+          'mode': 'WALK',
+          'startTime': start.toIso8601String(),
+          'endTime': end.toIso8601String(),
+          'routeShortName': 'Walking',
+          'from': {'name': 'Start', 'lat': fromLat, 'lon': fromLon},
+          'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
+        },
+      ],
+    };
+  }
+
+  Map<String, dynamic> _offlineEhailingItinerary({
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+  }) {
+    final distanceMeters = Geolocator.distanceBetween(
+      fromLat,
+      fromLon,
+      toLat,
+      toLon,
+    );
+    // A planning estimate only: OSRM supplies the actual line geometry later.
+    final drivingSeconds = math.max(300, (distanceMeters / 9.7).round() + 180);
+    final start = DateTime.now();
+    final end = start.add(Duration(seconds: drivingSeconds));
+    return {
+      'duration': drivingSeconds,
+      'routeCategory': 'ehailing',
+      'optionMessage':
+          'Direct e-hailing option — fare and traffic are determined by the booking provider.',
+      'legs': [
+        {
+          'mode': 'HAIL',
+          'startTime': start.toIso8601String(),
+          'endTime': end.toIso8601String(),
+          'routeShortName': 'E-hailing',
+          'paymentMethod': 'Pay in the e-hailing app',
+          'from': {'name': 'Pickup', 'lat': fromLat, 'lon': fromLon},
+          'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
+        },
+      ],
+    };
   }
 
   Future<void> _drawItinerary(
     List<Map<String, dynamic>> legs,
     int renderGeneration,
   ) async {
+    if (!_isCurrentItineraryRender(renderGeneration)) return;
     // 1. Clear any old routing layers and sources to keep the canvas clean
     for (final layerId in [
       'route_transit_layer',
@@ -1577,11 +1767,13 @@ class _MapViewState extends State<MapView> {
 
     final walkFeatures = <Map<String, dynamic>>[];
     final transitFeatures = <Map<String, dynamic>>[];
+    final hailFeatures = <Map<String, dynamic>>[];
     final routeCoordinates = <List<double>>[];
     bool hasGeometry = false;
 
     // 2. Loop through legs and separate geometries by transport mode
     for (final leg in legs) {
+      if (!_isCurrentItineraryRender(renderGeneration)) return;
       // The backend withholds geometry for the small set of source GTFS bus
       // shapes that fail its stop-to-shape audit. Omitting that segment is
       // more honest than drawing a misleading straight or incorrect line.
@@ -1593,6 +1785,7 @@ class _MapViewState extends State<MapView> {
       // follow the street network between the user's actual coordinates.
       if (isStreetLeg) {
         legCoordinates.addAll(await _fetchRoadGeometry(leg));
+        if (!_isCurrentItineraryRender(renderGeneration)) return;
       }
       final geometry = leg['legGeometry'];
       if (legCoordinates.isEmpty &&
@@ -1643,6 +1836,8 @@ class _MapViewState extends State<MapView> {
 
       if (mode.toUpperCase() == 'WALK') {
         walkFeatures.add(feature);
+      } else if (mode.toUpperCase() == 'HAIL') {
+        hailFeatures.add(feature);
       } else {
         transitFeatures.add(feature);
       }
@@ -1665,6 +1860,7 @@ class _MapViewState extends State<MapView> {
           data: {"type": "FeatureCollection", "features": walkFeatures},
         ),
       );
+      if (!_isCurrentItineraryRender(renderGeneration)) return;
       await _mapController?.addLineLayer(
         "route_walk_source",
         "route_walk_layer",
@@ -1689,6 +1885,7 @@ class _MapViewState extends State<MapView> {
           data: {"type": "FeatureCollection", "features": transitFeatures},
         ),
       );
+      if (!_isCurrentItineraryRender(renderGeneration)) return;
       await _mapController?.addLineLayer(
         "route_transit_source",
         "route_transit_layer",
@@ -1696,6 +1893,28 @@ class _MapViewState extends State<MapView> {
           lineColor: '#FF3B30', // High-visibility solid transit red
           lineWidth: 6.0,
           lineOpacity: 0.95,
+          lineCap: 'round',
+          lineJoin: 'round',
+        ),
+      );
+    }
+
+    if (hailFeatures.isNotEmpty &&
+        _isCurrentItineraryRender(renderGeneration)) {
+      await _mapController?.addSource(
+        'route_ehailing_source',
+        GeojsonSourceProperties(
+          data: {"type": "FeatureCollection", "features": hailFeatures},
+        ),
+      );
+      if (!_isCurrentItineraryRender(renderGeneration)) return;
+      await _mapController?.addLineLayer(
+        'route_ehailing_source',
+        'route_ehailing_layer',
+        const LineLayerProperties(
+          lineColor: '#7C3AED',
+          lineWidth: 5.0,
+          lineOpacity: 0.9,
           lineCap: 'round',
           lineJoin: 'round',
         ),
@@ -1743,14 +1962,23 @@ class _MapViewState extends State<MapView> {
       );
       return const [];
     }
+    final normalizedMode = leg['mode']?.toString().toUpperCase() ?? '';
+    final isWalking = normalizedMode == 'WALK';
+    // The OSM routing service exposes separate pedestrian and vehicle
+    // profiles. Using the vehicle profile for WALK can create long road
+    // detours that do not reflect a usable pedestrian path.
+    final routerBase = isWalking
+        ? 'https://routing.openstreetmap.de/routed-foot'
+        : 'https://router.project-osrm.org';
     final uri = Uri.parse(
-      'https://router.project-osrm.org/route/v1/driving/'
+      '$routerBase/route/v1/driving/'
       '$fromLon,$fromLat;$toLon,$toLat'
       '?overview=full&geometries=geojson&steps=false',
     );
     print(
-      '[JomNaik][route] Requesting OSM street geometry '
-      '(${_isStreetLegMode(leg['mode']?.toString() ?? '') ? leg['mode'] : 'unknown'}): $uri',
+      '[JomNaik][route] Requesting OSM '
+      '${isWalking ? 'pedestrian' : 'street'} geometry '
+      '($normalizedMode): $uri',
     );
     try {
       final response = await _httpClient
@@ -1883,20 +2111,18 @@ class _MapViewState extends State<MapView> {
   Future<void> _onMapCreated(MapLibreMapController controller) async {
     final generation = ++_mapGeneration;
     _mapController = controller;
+    // Annotation handles belong to a specific MapLibre instance. Recreate
+    // the blue location marker when the map view is rebuilt.
+    _userLocationMarker = null;
+    _userLocationHalo = null;
     print(
       '[JomNaik][map] MapLibre controller created '
       '(web=$kIsWeb, generation=$generation, styleReady=${_dynamicStyleString != null})',
     );
     print(
       '[JomNaik][map] Initial camera target=3.1390,101.6868 zoom=12; '
-      'OSM tiles=tile.openstreetmap.de',
+      'source=Protomaps PMTiles',
     );
-    if (kIsWeb) {
-      debugPrint(
-        '[JomNaik][web-map] OSM map created; tile requests should target '
-        'https://tile.openstreetmap.de',
-      );
-    }
     try {
       await controller.getStyle();
       print('[JomNaik][map] MapLibre style reported as loaded');
@@ -1922,50 +2148,6 @@ class _MapViewState extends State<MapView> {
     ) {
       _queryTappedFeature(point);
     });
-  }
-
-  Future<void> _addWebOpenStreetMapLayer(
-    MapLibreMapController controller,
-  ) async {
-    try {
-      const sourceId = 'web_openstreetmap_source';
-      const layerId = 'web_openstreetmap_layer';
-      try {
-        await controller.removeLayer(layerId);
-      } catch (_) {}
-      try {
-        await controller.removeSource(sourceId);
-      } catch (_) {}
-      await controller.addSource(
-        sourceId,
-        const RasterSourceProperties(
-          tiles: ['https://tile.openstreetmap.de/{z}/{x}/{y}.png'],
-          bounds: [_tileWest, _tileSouth, _tileEast, _tileNorth],
-          minzoom: 8,
-          tileSize: 256,
-          maxzoom: 19,
-          attribution: '© OpenStreetMap contributors',
-        ),
-      );
-      await controller.addRasterLayer(
-        sourceId,
-        layerId,
-        const RasterLayerProperties(rasterOpacity: 1),
-      );
-      await controller.animateCamera(
-        CameraUpdate.newLatLngZoom(const LatLng(3.1390, 101.6868), 12),
-      );
-      print(
-        '[JomNaik][web-map] SUCCESS OSM raster source/layer added '
-        '(source=$sourceId, layer=$layerId, bounds=Klang Valley, '
-        'tileSize=256, minzoom=8, maxzoom=19, camera=3.1390/101.6868@12)',
-      );
-    } catch (error) {
-      print(
-        '[JomNaik][web-map] FAILURE OSM raster source/layer: '
-        '${error.runtimeType}: $error',
-      );
-    }
   }
 
   Future<void> _startLocationTracking() async {
@@ -2018,17 +2200,18 @@ class _MapViewState extends State<MapView> {
     }
     if (isOutsideZone) return;
     _updateJourneyGuidance(position);
+    // Keep the station card's distance in sync with every GPS update, even
+    // when the nearest station itself has not changed.
+    _updateNearestStation(position);
     // GPS can emit several updates per second on some devices. Station
-    // matching, Supabase presence tracking and interchange prompts do not
-    // need that frequency; keep the map marker responsive while throttling
-    // the more expensive work to one pass every five seconds.
+    // presence tracking and interchange prompts do not need that frequency;
+    // keep those more expensive operations to one pass every five seconds.
     final now = DateTime.now();
     final shouldRunLocationWork =
         _lastLocationWorkAt == null ||
         now.difference(_lastLocationWorkAt!) >= const Duration(seconds: 5);
     if (shouldRunLocationWork) {
       _lastLocationWorkAt = now;
-      _updateNearestStation(position);
       _trackAnonymousStationPresence(position);
       unawaited(_askForNearbyStationChoice(position));
     }
@@ -2116,9 +2299,7 @@ class _MapViewState extends State<MapView> {
       );
       return candidateDistance < closestDistance ? candidate : closest;
     });
-    if (_nearestStation?.id != station.id) {
-      setState(() => _nearestStation = station);
-    }
+    setState(() => _nearestStation = station);
   }
 
   void _trackAnonymousStationPresence(Position position) {
@@ -2463,15 +2644,50 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _showMyLocation() async {
-    if (_lastKnownPosition == null) {
+    try {
+      // This action must request browser/device permission before asking for
+      // a position. Calling getCurrentPosition directly fails on first use.
       await _startLocationTracking();
+      if (!mounted) return;
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 0,
+        ),
+      );
+      await _updateUserLocation(position);
+    } catch (error) {
+      debugPrint('[JomNaik][location] Show-my-location failed: $error');
+      if (mounted) {
+        _showMessage(
+          'Could not get your location. Check browser location permission.',
+        );
+      }
     }
     final position = _lastKnownPosition;
     final controller = _mapController;
     if (position == null || controller == null) return;
 
     final location = LatLng(position.latitude, position.longitude);
+    await _renderUserLocation(controller, position);
     await controller.animateCamera(CameraUpdate.newLatLngZoom(location, 16));
+  }
+
+  Future<void> _showNorth() async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final camera = await controller.queryCameraPosition();
+    if (camera == null) return;
+    await controller.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: camera.target,
+          zoom: camera.zoom,
+          bearing: 0,
+          tilt: camera.tilt,
+        ),
+      ),
+    );
   }
 
   Future<void> _loadAndRenderOfflineRailLines() async {
@@ -3279,52 +3495,81 @@ class _MapViewState extends State<MapView> {
         if (!didPop && itineraryIsOpen) _dismissItinerary();
       },
       child: Scaffold(
+        extendBodyBehindAppBar: isMapTab,
         appBar: AppBar(
           automaticallyImplyLeading: false,
-          leadingWidth: isMapTab && _isSearchOpen ? 118 : null,
-          leading: isMapTab && _isSearchOpen
-              ? const Padding(
-                  padding: EdgeInsets.only(left: 16),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      _currentRegion,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
+          toolbarHeight: isMapTab ? 64 : null,
+          leadingWidth: isMapTab ? 148 : null,
+          leading: isMapTab
+              ? Padding(
+                  padding: const EdgeInsets.only(left: 12, top: 10, bottom: 10),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.black26),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _currentRegion,
+                          isExpanded: true,
+                          icon: const Icon(
+                            Icons.expand_more,
+                            color: Colors.black,
+                          ),
+                          items: const [
+                            DropdownMenuItem(
+                              value: _currentRegion,
+                              child: Text(
+                                _currentRegion,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                          onChanged: (_) {},
+                        ),
                       ),
                     ),
                   ),
                 )
               : null,
-          title: isMapTab && _isSearchOpen
-              ? TextField(
-                  key: const ValueKey('place-search-field'),
-                  controller: _placeSearchController,
-                  focusNode: _placeSearchFocusNode,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _searchPlaces(),
-                  onChanged: _onPlaceSearchChanged,
-                  decoration: const InputDecoration(
-                    hintText: 'Search for a location',
-                    border: InputBorder.none,
+          title: isMapTab
+              ? Padding(
+                  padding: const EdgeInsets.only(
+                    right: 12,
+                    top: 10,
+                    bottom: 10,
+                  ),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.black26),
+                    ),
+                    child: TextField(
+                      key: const ValueKey('place-search-field'),
+                      controller: _placeSearchController,
+                      focusNode: _placeSearchFocusNode,
+                      textInputAction: TextInputAction.search,
+                      onSubmitted: (_) => _searchPlaces(),
+                      onChanged: _onPlaceSearchChanged,
+                      decoration: const InputDecoration(
+                        hintText: 'Search for a location',
+                        prefixIcon: Icon(Icons.search, color: Colors.black),
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
                   ),
                 )
               : Text(isMapTab ? 'JomNaik' : 'Profile'),
-          actions: isMapTab
-              ? [
-                  IconButton(
-                    tooltip: _isSearchOpen
-                        ? 'Close search'
-                        : 'Search locations',
-                    icon: Icon(_isSearchOpen ? Icons.close : Icons.search),
-                    onPressed: _togglePlaceSearch,
-                  ),
-                ]
-              : const [],
+          actions: const [],
+          backgroundColor: isMapTab ? Colors.transparent : null,
+          surfaceTintColor: Colors.transparent,
           elevation: 0,
+          scrolledUnderElevation: 0,
         ),
         body: IndexedStack(
           index: _selectedTab,
@@ -3343,26 +3588,12 @@ class _MapViewState extends State<MapView> {
                         // keyed to the visible map centre, not device GPS.
                         trackCameraPosition: true,
                         onMapCreated: _onMapCreated,
-                        onStyleLoadedCallback: () {
-                          print(
-                            '[JomNaik][map] MapLibre onStyleLoaded '
-                            '(web=$kIsWeb, osm=$kIsWeb)',
-                          );
-                          if (kIsWeb && _mapController != null) {
-                            print(
-                              '[JomNaik][web-map] Starting OSM source/layer '
-                              'registration after style load',
-                            );
-                            unawaited(
-                              _addWebOpenStreetMapLayer(_mapController!),
-                            );
-                          }
-                        },
                         onMapLongClick: (_, coordinate) =>
                             _showLongPressedLocation(coordinate),
                         onCameraMove: _onCameraMove,
                         onCameraIdle: _onCameraIdle,
                         styleString: _dynamicStyleString!,
+                        compassEnabled: false,
                         // MapLibre's web implementation does not support
                         // custom compass margins. Leave them unset on web;
                         // native builds retain the layout above the buttons.
@@ -3373,46 +3604,12 @@ class _MapViewState extends State<MapView> {
                             ? null
                             : const Point(16, 160),
                       ),
-                      if (!_isSearchOpen)
+                      if (_currentItinerary == null)
                         Positioned(
-                          top: 12,
+                          top: 66,
                           left: 16,
                           right: 16,
-                          child: SafeArea(
-                            child: Row(
-                              children: [
-                                Expanded(child: _buildNearestStationCard()),
-                                if (_weatherTemperature != null) ...[
-                                  const SizedBox(width: 8),
-                                  Card(
-                                    elevation: 4,
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 12,
-                                      ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(
-                                            Icons.wb_sunny_outlined,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            '${_weatherTemperature!}${_weatherCondition == null ? '' : ' ${_weatherCondition!}'}',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
+                          child: _buildNearestStationCard(),
                         ),
                       if (_isSearchOpen &&
                           (_placeSearchResults.isNotEmpty ||
@@ -3870,10 +4067,21 @@ class _MapViewState extends State<MapView> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   FloatingActionButton(
+                    heroTag: 'show-north',
+                    onPressed: _showNorth,
+                    tooltip: 'Show north',
+                    backgroundColor: const Color(0xFFD8B4FE),
+                    foregroundColor: Colors.black,
+                    child: const Icon(Icons.navigation, color: Colors.black),
+                  ),
+                  const SizedBox(height: 12),
+                  FloatingActionButton(
                     heroTag: 'my-location',
                     onPressed: _showMyLocation,
                     tooltip: 'Show my location',
-                    child: const Icon(Icons.my_location),
+                    backgroundColor: const Color(0xFFD8B4FE),
+                    foregroundColor: Colors.black,
+                    child: const Icon(Icons.my_location, color: Colors.black),
                   ),
                 ],
               )

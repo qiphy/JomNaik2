@@ -35,6 +35,12 @@ Set these environment variables from `.env.example` in the hosting dashboard:
 
 Never put `SUPABASE_SERVICE_ROLE_KEY` or the TomTom key in Flutter.
 
+Traffic congestion is enabled only when the backend process receives a real
+`TOMTOM_API_KEY` environment variable. The example value `replace_me` is
+treated as unconfigured. Verify the setting with `GET /api/health`, which
+returns `"trafficConfigured": true` when the key is loaded. Restart the
+backend after changing environment variables.
+
 The service health check is `GET /api/health`.
 
 ### Live vehicles
