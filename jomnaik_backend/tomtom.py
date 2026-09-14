@@ -55,6 +55,10 @@ async def fetch_congestion(
         current_speed = float(flow["currentSpeed"])
         free_flow_speed = float(flow["freeFlowSpeed"])
         closure = bool(flow.get("roadClosure", False))
+    except httpx.HTTPStatusError as error:
+        raise TomTomTrafficError(
+            f"TomTom traffic request failed with HTTP {error.response.status_code}"
+        ) from error
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
         raise TomTomTrafficError("TomTom traffic data is unavailable") from error
 
