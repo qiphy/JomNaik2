@@ -23,7 +23,8 @@ For a physical phone or another deployed API, pass its publicly reachable URL
 flutter run --dart-define=GTFS_BACKEND_URL=http://192.168.1.10:8000
 ```
 
-`BACKEND_URL` remains supported for existing builds. Local web uses
-`http://localhost:8000` and Android emulators use `http://10.0.2.2:8000` by
-default. The app falls back to its bundled stop data when the backend is
-unavailable.
+`BACKEND_URL` remains supported for existing builds. For local web
+development, explicitly pass
+`--dart-define=GTFS_BACKEND_URL=http://localhost:8000`. Android emulators use
+`http://10.0.2.2:8000` when no URL is supplied. The app falls back to its
+bundled stop data when the backend is unavailable.

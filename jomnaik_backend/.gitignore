@@ -28,6 +28,8 @@ logs/
 tmp/
 temp/
 data/
+!data/
+!data/raptor_klang_valley.json
 *.sqlite3
 *.db
 

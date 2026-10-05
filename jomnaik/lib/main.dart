@@ -53,19 +53,10 @@ String get _backendBaseUrl {
     return _legacyConfiguredBackendBaseUrl;
   }
 
-  // A physical device needs the computer's LAN address, supplied through
-  // GTFS_BACKEND_URL. These defaults cover the local web and Android emulator
-  // development workflows without pointing the client at the unusable 0.0.0.0.
+  // Production builds use the deployed API. Local development can override
+  // this explicitly with --dart-define=GTFS_BACKEND_URL=http://localhost:8000.
   if (kIsWeb) {
-    final uri = Uri.base;
-    final localWebHost =
-        uri.host == 'localhost' || uri.host == '127.0.0.1' || uri.host == '::1';
-    // Keep the local development convention, but use the deployed site's
-    // origin by default so a web build does not call the visitor's localhost.
-    if (localWebHost) return 'http://localhost:8000';
-    if (uri.origin != 'null' && uri.host != 'localhost') {
-      return _deployedBackendBaseUrl;
-    }
+    return _deployedBackendBaseUrl;
   }
   if (defaultTargetPlatform == TargetPlatform.android) {
     return 'http://10.0.2.2:8000';
@@ -668,20 +659,7 @@ class _MapViewState extends State<MapView> {
   }
 
   List<String> _placeSearchBaseUrls() {
-    final candidates = <String>[_backendBaseUrl];
-    if (kIsWeb && _configuredGtfsBackendBaseUrl.isEmpty) {
-      final uri = Uri.base;
-      if (uri.host == 'localhost' ||
-          uri.host == '127.0.0.1' ||
-          uri.host == '::1') {
-        candidates.add('http://${uri.host}:8000');
-      } else if (uri.host.isNotEmpty) {
-        candidates.add(
-          uri.replace(port: 8000, path: '', query: '', fragment: '').origin,
-        );
-      }
-    }
-    return candidates.toSet().toList();
+    return <String>[_backendBaseUrl];
   }
 
   Future<PlaceSearchResult> _reverseGeocodePlace(LatLng coordinate) async {
