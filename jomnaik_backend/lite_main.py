@@ -13,7 +13,7 @@ from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -82,20 +82,6 @@ app.add_middleware(
 )
 
 
-async def _verified_user(authorization: str | None) -> None:
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        raise HTTPException(503, "Reporting is not configured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Sign in is required")
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": authorization},
-        )
-    if response.status_code != 200:
-        raise HTTPException(401, "Your sign-in session is invalid")
-
-
 async def _insert(table: str, body: dict[str, Any]) -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(503, "Reporting storage is not configured")
@@ -157,9 +143,7 @@ async def health() -> dict[str, str | bool | int]:
         "status": "ok",
         "routing": "on_device",
         "trafficConfigured": bool(_tomtom_api_key()),
-        "reportingConfigured": bool(
-            SUPABASE_URL and SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY
-        ),
+        "reportingConfigured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
         "reportingSupabaseUrlConfigured": bool(SUPABASE_URL),
         "reportingSupabaseAuthKeyConfigured": bool(SUPABASE_ANON_KEY),
         "reportingSupabaseWriteKeyConfigured": bool(SUPABASE_SERVICE_ROLE_KEY),
@@ -389,16 +373,14 @@ async def traffic(
 
 
 @app.post("/api/station-presence", status_code=202)
-async def station_presence(report: PresenceReport, authorization: str | None = Header(default=None)) -> dict[str, str]:
-    await _verified_user(authorization)
+async def station_presence(report: PresenceReport) -> dict[str, str]:
     body = report.model_dump(exclude_none=True)
     await _insert("anonymous_station_presence", body)
     return {"status": "accepted"}
 
 
 @app.post("/api/incidents", status_code=202)
-async def incidents(report: IncidentReport, authorization: str | None = Header(default=None)) -> dict[str, str]:
-    await _verified_user(authorization)
+async def incidents(report: IncidentReport) -> dict[str, str]:
     body = report.model_dump(exclude_none=True)
     await _insert("anonymous_incident_reports", body)
     return {"status": "accepted"}
