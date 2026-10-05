@@ -6,7 +6,7 @@ RAPTOR timetable. This optional FastAPI service adds only live context:
 - Open-Meteo weather for the current map centre.
 - TomTom road congestion for e-hailing/station access.
 - Official data.gov.my GTFS-Realtime bus and KTM vehicle positions.
-- Supabase-authenticated anonymous station-presence and incident reports.
+- Anonymous station-presence and incident reports stored in Supabase.
 
 There is no MOTIS process, GTFS import, scheduler, Databricks SDK, Lakebase
 dependency, database volume, or routing data in the deployable service.
@@ -35,13 +35,10 @@ Set these environment variables from `.env.example` in the hosting dashboard:
 
 Never put `SUPABASE_SERVICE_ROLE_KEY` or the TomTom key in Flutter.
 
-Reporting requires all three Supabase values in the Railway service
-environment: `SUPABASE_URL`, `SUPABASE_ANON_KEY` (or
-`SUPABASE_PUBLISHABLE_KEY`), and `SUPABASE_SERVICE_ROLE_KEY` (or
-`SUPABASE_SECRET_KEY`). The first two validate the signed-in user's
-Bearer token; the service-role key writes the anonymous station-presence and
-incident record. The `/api/health` response reports
-`"reportingConfigured": true` only when all three are present. Restart or
+Reporting requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in the Railway service
+The service-role key writes the anonymous station-presence and incident
+record. The `/api/health` response reports
+`"reportingConfigured": true` when those values are present. Reports are accepted anonymously. Restart or
 redeploy the Railway service after changing variables.
 
 ### Scheduled departures

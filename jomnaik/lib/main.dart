@@ -2830,22 +2830,6 @@ class _MapViewState extends State<MapView> {
       _showMessage('Incident reporting is not configured yet.');
       return;
     }
-    final auth = Supabase.instance.client.auth;
-    if (auth.currentUser == null) {
-      _showMessage('Sign in to submit an incident report.');
-      return;
-    }
-    if (auth.currentSession == null) {
-      try {
-        await auth.refreshSession();
-      } on AuthException {
-        // The following message gives the user a safe way to recover.
-      }
-    }
-    if (auth.currentSession == null) {
-      _showMessage('Your sign-in session has expired. Please sign in again.');
-      return;
-    }
     if (_lastKnownPosition == null) await _startLocationTracking();
     if (!mounted) return;
     final position = _lastKnownPosition;
