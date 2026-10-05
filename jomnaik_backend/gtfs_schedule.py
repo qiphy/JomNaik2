@@ -45,6 +45,12 @@ def _candidate_stop_ids(bundle: dict[str, Any], stop_id: str) -> set[str]:
 def _service_active(
     bundle: dict[str, Any], service_id: str, date: datetime
 ) -> bool:
+    exceptions = bundle.get("exceptions", {}).get(service_id, {})
+    exception = exceptions.get(date.strftime("%Y%m%d"))
+    if exception == 1:
+        return True
+    if exception == 2:
+        return False
     calendar = bundle.get("calendars", {}).get(service_id)
     if not isinstance(calendar, list) or len(calendar) < 9:
         return False
@@ -54,6 +60,19 @@ def _service_active(
         return False
     return calendar[date.weekday()] is True
 
+
+def _terminal_name(headsign: Any, route: Any) -> str:
+    """Extract the terminal station from a GTFS trip headsign."""
+    value = str(headsign or "").strip()
+    lower = value.casefold()
+    marker = " to "
+    if marker in lower:
+        return value[lower.rfind(marker) + len(marker) :].strip()
+    if value:
+        return value.removeprefix("To ").strip()
+    if isinstance(route, list) and len(route) > 1:
+        return str(route[1])
+    return ""
 
 def departures_for_stop(
     stop_id: str, *, limit: int = 6, now: datetime | None = None
@@ -72,6 +91,7 @@ def departures_for_stop(
     for day_offset in range(7):
         service_day = local_now + timedelta(days=day_offset)
         day_start = service_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_departures: list[dict[str, Any]] = []
         for trip in bundle.get("trips", []):
             if not isinstance(trip, list) or len(trip) < 5:
                 continue
@@ -83,6 +103,23 @@ def departures_for_stop(
             calls = trip[4]
             if not isinstance(calls, list):
                 continue
+            first_call = next(
+                (
+                    call
+                    for call in calls
+                    if isinstance(call, list)
+                    and len(call) >= 3
+                    and isinstance(call[2], (int, float))
+                ),
+                None,
+            )
+            if first_call is None:
+                continue
+            first_departure = int(first_call[2])
+            frequency_windows = trip[5] if len(trip) > 5 else []
+            frequency_windows = (
+                frequency_windows if isinstance(frequency_windows, list) else []
+            )
             for call in calls:
                 if (
                     not isinstance(call, list)
@@ -93,21 +130,43 @@ def departures_for_stop(
                 seconds = call[2]
                 if not isinstance(seconds, (int, float)):
                     continue
-                departure = day_start + timedelta(seconds=int(seconds))
-                if departure < local_now:
-                    continue
                 route_name = route[0] if isinstance(route, list) and route else route_id
-                terminal = route[1] if isinstance(route, list) and len(route) > 1 else ""
-                departures.append(
-                    {
-                        "route": str(route_name),
-                        "time": departure.strftime("%H:%M"),
-                        "timestamp": int(departure.timestamp() * 1000),
-                        "is_estimated": False,
-                        "terminal": str(terminal),
-                    }
-                )
+                terminal = _terminal_name(trip[3] if len(trip) > 3 else "", route)
+                departures_for_trip: list[int] = []
+                if frequency_windows:
+                    for window in frequency_windows:
+                        if (
+                            not isinstance(window, list)
+                            or len(window) < 3
+                            or not all(isinstance(value, (int, float)) for value in window[:3])
+                            or int(window[2]) <= 0
+                        ):
+                            continue
+                        start, end, headway = map(int, window[:3])
+                        shift = start - first_departure
+                        for departure_start in range(start, end + 1, headway):
+                            departures_for_trip.append(
+                                int(seconds) + shift + departure_start - start
+                            )
+                else:
+                    departures_for_trip.append(int(seconds))
+                for departure_seconds in departures_for_trip:
+                    departure = day_start + timedelta(seconds=departure_seconds)
+                    if departure < local_now:
+                        continue
+                    day_departures.append(
+                        {
+                            "route": str(route_name),
+                            "time": departure.strftime("%H:%M"),
+                            "date": departure.date().isoformat(),
+                            "timestamp": int(departure.timestamp() * 1000),
+                            "is_estimated": False,
+                            "terminal": str(terminal),
+                        }
+                    )
                 break
+        if day_departures:
+            departures.extend(day_departures)
         if len(departures) >= limit:
             break
 
