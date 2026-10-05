@@ -1,4 +1,4 @@
-# JomNaik Flutter app
+# jomnaik Flutter app
 
 The app reads the current transit-stop catalogue and scheduled departures from
 the sibling `jomnaik_backend` FastAPI service.
@@ -10,8 +10,14 @@ cd ../jomnaik_backend
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Then start Flutter from this folder. For a physical phone or deployed API,
-pass the publicly reachable API URL (without a trailing slash):
+Then start Flutter from this folder. The production build uses:
+
+```text
+https://jomnaik2-production.up.railway.app
+```
+
+For a physical phone or another deployed API, pass its publicly reachable URL
+(without a trailing slash):
 
 ```sh
 flutter run --dart-define=GTFS_BACKEND_URL=http://192.168.1.10:8000

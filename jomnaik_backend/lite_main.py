@@ -1,4 +1,4 @@
-"""Small optional live-context API for the on-device JomNaik router.
+"""Small optional live-context API for the on-device jomnaik router.
 
 RAPTOR routing now runs in Flutter.  This service deliberately contains no
 MOTIS binary, GTFS import, scheduler, or local database.  It is safe to host
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from tomtom import TomTomTrafficError, fetch_congestion
 from realtime import fetch_vehicle_positions
 from weather import fetch_current_weather
-from gtfs_schedule import departures_for_stop
+from gtfs_schedule import _load_bundle, departures_for_stop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jomnaik")
@@ -60,7 +60,7 @@ class IncidentReport(BaseModel):
     reported_at: str | None = None
 
 
-app = FastAPI(title="JomNaik Live Context API", version="1.0")
+app = FastAPI(title="jomnaik Live Context API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in os.getenv("CORS_ORIGINS", "*").split(",")],
@@ -131,10 +131,23 @@ async def _vehicle_positions() -> dict[str, Any]:
 @app.get("/api/health")
 async def health() -> dict[str, str | bool]:
     logger.info("GET /api/health success")
+    timetable_configured = False
+    timetable_stops = 0
+    timetable_trips = 0
+    try:
+        bundle = _load_bundle()
+        timetable_configured = True
+        timetable_stops = len(bundle.get("stops", {}))
+        timetable_trips = len(bundle.get("trips", []))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        pass
     return {
         "status": "ok",
         "routing": "on_device",
         "trafficConfigured": bool(_tomtom_api_key()),
+        "timetableConfigured": timetable_configured,
+        "timetableStops": timetable_stops,
+        "timetableTrips": timetable_trips,
     }
 
 
@@ -199,7 +212,7 @@ async def places_search(
                 },
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "JomNaik/1.0 (Klang Valley transit app)",
+                    "User-Agent": "jomnaik/1.0 (Klang Valley transit app)",
                 },
             )
             response.raise_for_status()

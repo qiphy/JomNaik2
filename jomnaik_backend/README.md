@@ -1,6 +1,6 @@
-# JomNaik live-context backend
+# jomnaik live-context backend
 
-JomNaik plans static public-transit journeys on the device using its bundled
+jomnaik plans static public-transit journeys on the device using its bundled
 RAPTOR timetable. This optional FastAPI service adds only live context:
 
 - Open-Meteo weather for the current map centre.
@@ -14,7 +14,7 @@ If this API is down, Flutter still supplies an offline timetable itinerary.
 
 ## Deploy
 
-Push the **JomNaik parent folder** (containing both `jomnaik/` and
+Push the **jomnaik parent folder** (containing both `jomnaik/` and
 `jomnaik_backend/`) to one GitHub repository, then create either a Railway or
 Railway web service with `jomnaik_backend` as its root directory. The service
 starts with:
@@ -34,6 +34,32 @@ Set these environment variables from `.env.example` in the hosting dashboard:
   example with your GitHub repository and default branch)
 
 Never put `SUPABASE_SERVICE_ROLE_KEY` or the TomTom key in Flutter.
+
+### Scheduled departures
+
+The departures endpoint reads the generated static timetable bundle from one
+of these locations:
+
+1. `jomnaik_backend/data/raptor_klang_valley.json`
+2. `jomnaik/assets/offline/raptor_klang_valley.json`
+
+The second location is used when deploying the repository root with
+`jomnaik_backend` as the service directory. If the backend is deployed as a
+standalone directory, copy the generated bundle to
+`jomnaik_backend/data/raptor_klang_valley.json` during deployment. Do not
+replace it with the raw GTFS ZIP files; the endpoint expects the generated
+bundle containing `stops`, `trips`, `routes`, `calendars`, and `exceptions`.
+
+Verify the deployment before connecting Flutter:
+
+```sh
+curl https://your-service.example.com/api/health
+curl "https://your-service.example.com/api/gtfs/stops/1005838/departures?limit=6"
+```
+
+`/api/health` must report `timetableConfigured: true` and non-zero
+`timetableStops` and `timetableTrips`. The departures endpoint accepts either
+the full ID (`rapid-kl-bus:1005838`) or the short GTFS ID (`1005838`).
 
 Traffic congestion is enabled only when the backend process receives a real
 `TOMTOM_API_KEY` environment variable. The example value `replace_me` is

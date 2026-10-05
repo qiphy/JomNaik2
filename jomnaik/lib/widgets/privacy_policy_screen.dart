@@ -55,7 +55,7 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'JomNaik Privacy Policy',
+                      'JomRide Privacy Policy',
                       style: textTheme.headlineSmall?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
@@ -67,14 +67,14 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                     ),
                     const SizedBox(height: 20),
                     const _PrivacySection(
-                      title: 'What JomNaik uses',
+                      title: 'What JomRide uses',
                       body:
                           'When you grant location permission, the app uses your location to show your position, find nearby stops and plan journeys. During active live journey guidance, location updates advance your next-step instruction and can be used to replan from your current location. Map-centre coordinates are sent to the routing and weather services when you search or move the map. When a live-guided journey reaches its destination, a small trip summary (destination name, duration, modes and completion time) is saved only in encrypted storage on your device, with a maximum of 20 summaries. You can use the app without granting location permission by searching for places manually.',
                     ),
                     const _PrivacySection(
                       title: 'Optional station presence sharing',
                       body:
-                          'Station location tracking is off by default and can only be enabled in your profile after sign-in. When enabled, JomNaik sends only a station or stop ID and time after you are confirmed near it. It does not send your account ID, device ID or raw GPS coordinates with that record. These anonymous presence records are retained for 24 hours, then deleted.',
+                          'Station location tracking is off by default and can only be enabled in your profile after sign-in. When enabled, JomRide sends only a station or stop ID and time after you are confirmed near it. It does not send your account ID, device ID or raw GPS coordinates with that record. These anonymous presence records are retained for 24 hours, then deleted.',
                     ),
                     const _PrivacySection(
                       title: 'Accounts and reports',
@@ -84,17 +84,17 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                     const _PrivacySection(
                       title: 'Service providers',
                       body:
-                          'Routing and operational data are processed by the JomNaik backend on Databricks. Weather requests use Open-Meteo, and traffic requests use TomTom when traffic information is shown. Opening an e-hailing app takes you to that provider, whose privacy terms apply separately.',
+                          'Routing and operational data are processed by the JomRide backend on Databricks. Weather requests use Open-Meteo, and traffic requests use TomTom when traffic information is shown. Opening an e-hailing app takes you to that provider, whose privacy terms apply separately.',
                     ),
                     const _PrivacySection(
                       title: 'Your choices',
                       body:
-                          'You can deny or revoke location permission in your device settings, keep station location tracking off, sign out, or stop using the app at any time. For account-data questions or deletion requests, contact the JomNaik beta team through the feedback channel supplied with your test invitation.',
+                          'You can deny or revoke location permission in your device settings, keep station location tracking off, sign out, or stop using the app at any time. For account-data questions or deletion requests, contact the joJomRidemnaik beta team through the feedback channel supplied with your test invitation.',
                     ),
                     const _PrivacySection(
                       title: 'Beta notice',
                       body:
-                          'JomNaik provides travel-planning guidance only. It does not guarantee live arrivals, fares, e-hailing availability or service conditions. This policy may be updated before a public release; you will be asked to review a new version in the app.',
+                          'JomRide provides travel-planning guidance only. It does not guarantee live arrivals, fares, e-hailing availability or service conditions. This policy may be updated before a public release; you will be asked to review a new version in the app.',
                     ),
                   ],
                 ),
@@ -121,7 +121,7 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                           width: 20,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Text('Continue to JomNaik'),
+                      : const Text('Continue to JomRide'),
                 ),
               ),
             ),

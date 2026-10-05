@@ -1,4 +1,4 @@
-name: JomNaik
+name: jomnaik
 description: "High-signal transit routing."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -69,6 +69,7 @@ flutter:
     - assets/style/protomaps_light.json
     - assets/style/minimal_style.json
     - assets/transit/
+    - assets/65f71978-dde6-4d73-86a7-767322b8edbb/Rapid KL.geojson
     - assets/offline/raptor_klang_valley.json
     - assets/logo.png
     

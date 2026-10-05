@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Jomnaik</string>
+	<string>jomnaik</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -27,7 +27,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>JomNaik uses your location while the app is open to show your position on the map and help plan journeys.</string>
+	<string>jomnaik uses your location while the app is open to show your position on the map and help plan journeys.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

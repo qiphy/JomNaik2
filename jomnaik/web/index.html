@@ -29,9 +29,9 @@
     if (window.pmtiles && window.maplibregl) {
       const protocol = new window.pmtiles.Protocol();
       window.maplibregl.addProtocol('pmtiles', protocol.tile);
-      console.log('[JomNaik][map] PMTiles protocol registered');
+      console.log('[jomnaik][map] PMTiles protocol registered');
     } else {
-      console.error('[JomNaik][map] PMTiles or MapLibre failed to load');
+      console.error('[jomnaik][map] PMTiles or MapLibre failed to load');
     }
   </script>
 

@@ -45,6 +45,12 @@ def _candidate_stop_ids(bundle: dict[str, Any], stop_id: str) -> set[str]:
 def _service_active(
     bundle: dict[str, Any], service_id: str, date: datetime
 ) -> bool:
+    exceptions = bundle.get("exceptions", {}).get(service_id, {})
+    exception = exceptions.get(date.strftime("%Y%m%d"))
+    if exception == 1:
+        return True
+    if exception == 2:
+        return False
     calendar = bundle.get("calendars", {}).get(service_id)
     if not isinstance(calendar, list) or len(calendar) < 9:
         return False

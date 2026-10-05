@@ -1,4 +1,4 @@
-"""Live weather client for JomNaik regions."""
+"""Live weather client for jomnaik regions."""
 
 from __future__ import annotations
 
