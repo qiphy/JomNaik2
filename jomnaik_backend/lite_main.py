@@ -25,9 +25,21 @@ from gtfs_schedule import _load_bundle, departures_for_stop
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jomnaik")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+SUPABASE_URL = _env_first("SUPABASE_URL").rstrip("/")
+SUPABASE_ANON_KEY = _env_first("SUPABASE_ANON_KEY", "SUPABASE_PUBLISHABLE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = _env_first(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_SECRET_KEY",
+)
 _weather_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _traffic_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _offline_manifest_cache: tuple[float, dict[str, str]] | None = None
@@ -148,6 +160,9 @@ async def health() -> dict[str, str | bool | int]:
         "reportingConfigured": bool(
             SUPABASE_URL and SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY
         ),
+        "reportingSupabaseUrlConfigured": bool(SUPABASE_URL),
+        "reportingSupabaseAuthKeyConfigured": bool(SUPABASE_ANON_KEY),
+        "reportingSupabaseWriteKeyConfigured": bool(SUPABASE_SERVICE_ROLE_KEY),
         "timetableConfigured": timetable_configured,
         "timetableStops": timetable_stops,
         "timetableTrips": timetable_trips,
