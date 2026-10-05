@@ -129,7 +129,7 @@ async def _vehicle_positions() -> dict[str, Any]:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str | bool]:
+async def health() -> dict[str, str | bool | int]:
     logger.info("GET /api/health success")
     timetable_configured = False
     timetable_stops = 0
