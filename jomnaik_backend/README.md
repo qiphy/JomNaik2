@@ -35,9 +35,10 @@ Set these environment variables from `.env.example` in the hosting dashboard:
 
 Never put `SUPABASE_SERVICE_ROLE_KEY` or the TomTom key in Flutter.
 
-Reporting requires all three Supabase variables in the Railway service
-environment: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and
-`SUPABASE_SERVICE_ROLE_KEY`. The first two validate the signed-in user's
+Reporting requires all three Supabase values in the Railway service
+environment: `SUPABASE_URL`, `SUPABASE_ANON_KEY` (or
+`SUPABASE_PUBLISHABLE_KEY`), and `SUPABASE_SERVICE_ROLE_KEY` (or
+`SUPABASE_SECRET_KEY`). The first two validate the signed-in user's
 Bearer token; the service-role key writes the anonymous station-presence and
 incident record. The `/api/health` response reports
 `"reportingConfigured": true` only when all three are present. Restart or
