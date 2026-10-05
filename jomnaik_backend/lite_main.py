@@ -145,6 +145,9 @@ async def health() -> dict[str, str | bool | int]:
         "status": "ok",
         "routing": "on_device",
         "trafficConfigured": bool(_tomtom_api_key()),
+        "reportingConfigured": bool(
+            SUPABASE_URL and SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY
+        ),
         "timetableConfigured": timetable_configured,
         "timetableStops": timetable_stops,
         "timetableTrips": timetable_trips,
