@@ -1,4 +1,4 @@
-# jomnaik Flutter app
+# JomRide Flutter app
 
 The app reads the current transit-stop catalogue and scheduled departures from
 the sibling `jomnaik_backend` FastAPI service.

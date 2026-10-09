@@ -8,9 +8,9 @@ const _useSupabaseGatewayAuth = bool.fromEnvironment(
   defaultValue: false,
 );
 
-/// Headers shared by jomnaik backend requests.
+/// Headers shared by jomride backend requests.
 ///
-/// Beta builds send the signed-in user's Supabase access token to the jomnaik
+/// Beta builds send the signed-in user's Supabase access token to the jomride
 /// gateway. The gateway verifies it and keeps the Databricks credential on
 /// the server side. A debug build can instead temporarily supply a Databricks
 /// bearer token when it calls the App proxy directly. That value is compiled
@@ -19,7 +19,8 @@ Future<Map<String, String>> backendHeaders({bool json = false}) async {
   final headers = <String, String>{'Accept': 'application/json'};
   if (json) headers['Content-Type'] = 'application/json';
   if (_useSupabaseGatewayAuth) {
-    final accessToken = Supabase.instance.client.auth.currentSession?.accessToken;
+    final accessToken =
+        Supabase.instance.client.auth.currentSession?.accessToken;
     if (accessToken != null && accessToken.isNotEmpty) {
       headers['Authorization'] = 'Bearer $accessToken';
     }

@@ -89,7 +89,7 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
                     const _PrivacySection(
                       title: 'Your choices',
                       body:
-                          'You can deny or revoke location permission in your device settings, keep station location tracking off, sign out, or stop using the app at any time. For account-data questions or deletion requests, contact the joJomRidemnaik beta team through the feedback channel supplied with your test invitation.',
+                          'You can deny or revoke location permission in your device settings, keep station location tracking off, sign out, or stop using the app at any time. For account-data questions or deletion requests, contact the JomRide beta team through the feedback channel supplied with your test invitation.',
                     ),
                     const _PrivacySection(
                       title: 'Beta notice',
