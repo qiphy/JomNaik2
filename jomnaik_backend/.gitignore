@@ -30,6 +30,8 @@ temp/
 data/
 !data/
 !data/raptor_klang_valley.json
+data/osm/
+*.osm.pbf
 *.sqlite3
 *.db
 

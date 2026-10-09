@@ -1029,6 +1029,8 @@ class _MapViewState extends State<MapView> {
     final signals = <String>[
       if (sheltered) 'Sheltered walkways',
       if (hasBusyStation) 'Busy station reported',
+      if (itinerary['incidentRiskLabel'] is String)
+        itinerary['incidentRiskLabel'] as String,
     ];
     return signals.isEmpty ? summary : '$summary • ${signals.join(' • ')}';
   }
@@ -1042,12 +1044,20 @@ class _MapViewState extends State<MapView> {
   }
 
   String _formatDuration(num seconds) {
-    final totalMinutes = (seconds / 60).round();
+    final totalMinutes = (seconds / 60).ceil();
     final hours = totalMinutes ~/ 60;
     final minutes = totalMinutes % 60;
     if (hours == 0) return '$minutes min';
     if (minutes == 0) return '${hours}h';
     return '${hours}h ${minutes}m';
+  }
+
+  int _durationFromLegs(List<Map<String, dynamic>> legs, int fallback) {
+    if (legs.isEmpty) return fallback;
+    final start = DateTime.tryParse(legs.first['startTime']?.toString() ?? '');
+    final end = DateTime.tryParse(legs.last['endTime']?.toString() ?? '');
+    if (start == null || end == null || !end.isAfter(start)) return fallback;
+    return end.difference(start).inSeconds;
   }
 
   Future<void> _showRouteChoices(Map<String, dynamic>? routeData) async {
@@ -1133,6 +1143,11 @@ class _MapViewState extends State<MapView> {
             (right['duration'] as num?)?.toDouble() ?? double.infinity,
           );
       if (durationComparison != 0) return durationComparison;
+      final riskComparison =
+          ((left['incidentRiskScore'] as num?)?.toDouble() ?? 0).compareTo(
+            (right['incidentRiskScore'] as num?)?.toDouble() ?? 0,
+          );
+      if (riskComparison != 0) return riskComparison;
       final leftTransfers = (left['transferCount'] as num?)?.toInt() ?? 0;
       final rightTransfers = (right['transferCount'] as num?)?.toInt() ?? 0;
       final transferComparison = leftTransfers.compareTo(rightTransfers);
@@ -1717,13 +1732,14 @@ class _MapViewState extends State<MapView> {
         _showMessage(
           'Using offline timetable routing. Live updates are unavailable.',
         );
-        return _addDirectModeAlternatives(
+        final alternatives = _addDirectModeAlternatives(
           result,
           fromLat: fromLat,
           fromLon: fromLon,
           toLat: toLat,
           toLon: toLon,
         );
+        return _applyIncidentRisk(alternatives);
       }
     } catch (error) {
       debugPrint('Offline RAPTOR route error: $error');
@@ -1739,6 +1755,102 @@ class _MapViewState extends State<MapView> {
       ],
       'offlineRouting': true,
     };
+  }
+
+  Future<Map<String, dynamic>> _applyIncidentRisk(
+    Map<String, dynamic> routeData,
+  ) async {
+    try {
+      final response = await _httpClient
+          .get(
+            Uri.parse('$_backendBaseUrl/api/incidents/recent'),
+            headers: await backendHeaders(),
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return routeData;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['incidents'] is! List) return routeData;
+      final incidents = (decoded['incidents'] as List)
+          .whereType<Map>()
+          .toList();
+      final itineraries = routeData['itineraries'];
+      if (itineraries is! List) return routeData;
+      return {
+        ...routeData,
+        'itineraries': itineraries.map((raw) {
+          if (raw is! Map) return raw;
+          final itinerary = Map<String, dynamic>.from(raw);
+          final risk = _incidentRiskForItinerary(itinerary, incidents);
+          return {
+            ...itinerary,
+            'incidentRiskScore': risk.score,
+            if (risk.count > 0)
+              'incidentRiskLabel':
+                  'Reported incidents: ${risk.reports.join('; ')}',
+            if (risk.count == 0)
+              'incidentRiskLabel': 'No recent reported incidents',
+          };
+        }).toList(),
+      };
+    } catch (_) {
+      return routeData;
+    }
+  }
+
+  ({double score, int count, List<String> reports}) _incidentRiskForItinerary(
+    Map<String, dynamic> itinerary,
+    List<Map> incidents,
+  ) {
+    var score = 0.0;
+    var count = 0;
+    final reports = <String>[];
+    for (final leg in _itineraryLegs(itinerary)) {
+      final mode = leg['mode']?.toString().toUpperCase();
+      if (mode == 'WALK' || mode == 'HAIL') continue;
+      final route = leg['routeShortName']?.toString().trim().toLowerCase();
+      final points = <Map>[];
+      if (leg['from'] is Map) points.add(leg['from'] as Map);
+      if (leg['intermediateStops'] is List) {
+        points.addAll((leg['intermediateStops'] as List).whereType<Map>());
+      }
+      if (leg['to'] is Map) points.add(leg['to'] as Map);
+      for (final incident in incidents) {
+        final lat = (incident['station_lat'] as num?)?.toDouble();
+        final lon = (incident['station_lon'] as num?)?.toDouble();
+        if (lat == null || lon == null) continue;
+        final incidentRoute = incident['service_route']
+            ?.toString()
+            .trim()
+            .toLowerCase();
+        final routeMatches =
+            incidentRoute == null ||
+            incidentRoute.isEmpty ||
+            route == null ||
+            route == incidentRoute;
+        if (!routeMatches) continue;
+        final nearStop = points.any((point) {
+          final pointLat = (point['lat'] as num?)?.toDouble();
+          final pointLon = (point['lon'] as num?)?.toDouble();
+          return pointLat != null &&
+              pointLon != null &&
+              Geolocator.distanceBetween(pointLat, pointLon, lat, lon) <= 180;
+        });
+        if (nearStop) {
+          count++;
+          score += incidentRoute == null || incidentRoute.isEmpty ? 1.0 : 1.5;
+          final station = incident['station_name']?.toString();
+          final reportType = incident['report_type']?.toString();
+          final detail = [
+            if (reportType != null && reportType.isNotEmpty) reportType,
+            if (station != null && station.isNotEmpty) 'near $station',
+          ].join(' ');
+          if (detail.isNotEmpty && !reports.contains(detail)) {
+            reports.add(detail);
+          }
+        }
+      }
+    }
+    return (score: score, count: count, reports: reports);
   }
 
   Map<String, dynamic> _addDirectModeAlternatives(
@@ -1856,12 +1968,10 @@ class _MapViewState extends State<MapView> {
       final walkingSeconds =
           (itinerary['walkingSeconds'] as num?)?.toInt() ?? 0;
       final duration = (itinerary['duration'] as num?)?.toInt() ?? 0;
+      final updatedDuration = _durationFromLegs(legs, duration);
       alternatives.add({
         ...itinerary,
-        'duration': math.max(
-          0,
-          duration - walkEnd.difference(walkStart).inSeconds + hailSeconds,
-        ),
+        'duration': updatedDuration,
         'walkingSeconds': math.max(
           0,
           walkingSeconds - walkEnd.difference(walkStart).inSeconds,
@@ -1941,12 +2051,10 @@ class _MapViewState extends State<MapView> {
       final replacedSeconds = originalEnd == null
           ? 0
           : originalEnd.difference(start).inSeconds;
+      final updatedDuration = _durationFromLegs(legs, originalDuration);
       alternatives.add({
         ...itinerary,
-        'duration': math.max(
-          0,
-          originalDuration - replacedSeconds + hailSeconds,
-        ),
+        'duration': updatedDuration,
         'walkingSeconds': math.max(0, originalWalkSeconds - replacedSeconds),
         'fareMin':
             (itinerary['fareMin'] as num?)?.toDouble() ?? distanceMeters / 1000,
@@ -2087,10 +2195,6 @@ class _MapViewState extends State<MapView> {
     // 2. Loop through legs and separate geometries by transport mode
     for (final leg in legs) {
       if (!_isCurrentItineraryRender(renderGeneration)) return;
-      // The backend withholds geometry for the small set of source GTFS bus
-      // shapes that fail its stop-to-shape audit. Omitting that segment is
-      // more honest than drawing a misleading straight or incorrect line.
-      if (leg['geometryQuality'] == 'unverified') continue;
       final mode = leg['mode'] as String? ?? 'WALK';
       final legCoordinates = <List<double>>[];
       final isStreetLeg = _isStreetLegMode(mode);
@@ -2123,8 +2227,13 @@ class _MapViewState extends State<MapView> {
         if (!_isCurrentItineraryRender(renderGeneration)) return;
       }
       final geometry = leg['legGeometry'];
+      if (leg['geometryQuality'] == 'unverified' &&
+          mode.toUpperCase() == 'BUS') {
+        legCoordinates.addAll(await _fetchBusRoadGeometry(leg));
+      }
       if (legCoordinates.isEmpty &&
           !isStreetLeg &&
+          leg['geometryQuality'] != 'unverified' &&
           geometry is Map &&
           geometry['points'] is String) {
         final points = geometry['points'] as String;
@@ -2134,6 +2243,7 @@ class _MapViewState extends State<MapView> {
         legCoordinates.addAll(_decodePolyline(points, precision: precision));
       } else if (legCoordinates.isEmpty &&
           !isStreetLeg &&
+          leg['geometryQuality'] != 'unverified' &&
           geometry is Map &&
           geometry['coordinates'] is List) {
         // GTFS shapes are supplied by the backend for generated BRT legs.
@@ -2381,6 +2491,75 @@ class _MapViewState extends State<MapView> {
       return result;
     } catch (error) {
       print('[JomNaik][route] OSM road geometry request failed: $error');
+      return const [];
+    }
+  }
+
+  Future<List<List<double>>> _fetchBusRoadGeometry(
+    Map<String, dynamic> leg,
+  ) async {
+    final points = <Map<String, dynamic>>[];
+    final from = leg['from'];
+    final intermediate = leg['intermediateStops'];
+    final to = leg['to'];
+    if (from is Map) points.add(Map<String, dynamic>.from(from));
+    if (intermediate is List) {
+      points.addAll(
+        intermediate.whereType<Map>().map(Map<String, dynamic>.from),
+      );
+    }
+    if (to is Map) points.add(Map<String, dynamic>.from(to));
+    if (points.length < 2 ||
+        points.any(
+          (point) =>
+              point['lat'] is! num ||
+              point['lon'] is! num ||
+              !_isSupportedCoordinate(
+                (point['lat'] as num).toDouble(),
+                (point['lon'] as num).toDouble(),
+              ),
+        )) {
+      return const [];
+    }
+    final coordinates = points
+        .map(
+          (point) =>
+              '${(point['lon'] as num).toDouble()},${(point['lat'] as num).toDouble()}',
+        )
+        .join(';');
+    final uri = Uri.parse(
+      'https://router.project-osrm.org/route/v1/driving/$coordinates'
+      '?overview=full&geometries=geojson&steps=false',
+    );
+    try {
+      final response = await _httpClient
+          .get(uri)
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return const [];
+      final decoded = jsonDecode(response.body);
+      final route = _shortestRouterRoute(
+        decoded is Map ? decoded['routes'] : null,
+      );
+      if (route == null) return const [];
+      final geometry = route['geometry'];
+      final rawCoordinates = geometry is Map ? geometry['coordinates'] : null;
+      if (rawCoordinates is! List) return const [];
+      final result = rawCoordinates
+          .whereType<List>()
+          .where(
+            (point) => point.length >= 2 && point[0] is num && point[1] is num,
+          )
+          .map(
+            (point) => [
+              (point[0] as num).toDouble(),
+              (point[1] as num).toDouble(),
+            ],
+          )
+          .where((point) => _isSupportedCoordinate(point[1], point[0]))
+          .toList();
+      return result.length >= 2 ? result : const [];
+    } catch (error) {
+      debugPrint('Bus road geometry request failed: $error');
       return const [];
     }
   }
