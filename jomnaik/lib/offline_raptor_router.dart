@@ -423,7 +423,8 @@ class OfflineRaptorRouter {
         );
       }
       final route = routes[ride.trip.routeId] as List? ?? const [];
-      final geometry = _routeGeometry(
+      final mode = _mode(route.length > 2 ? route[2] as int : 3);
+      final shapeGeometry = _routeGeometry(
         routeId: ride.trip.routeId,
         fromStop: ride.fromStop,
         toStop: ride.toStop,
@@ -432,13 +433,16 @@ class OfflineRaptorRouter {
           if (data['railShapes'] is List) ...(data['railShapes'] as List),
           if (data['routeShapes'] is List) ...(data['routeShapes'] as List),
         ],
-        fallback: [
-          for (var n = ride.fromIndex; n <= ride.toIndex; n++)
-            _placeCoordinates(ride.trip.calls[n].stopId, stops),
-        ],
+        fallback: const [],
       );
+      final geometry = shapeGeometry.isNotEmpty
+          ? shapeGeometry
+          : [
+              for (var n = ride.fromIndex; n <= ride.toIndex; n++)
+                _placeCoordinates(ride.trip.calls[n].stopId, stops),
+            ];
       legs.add({
-        'mode': _mode(route.length > 2 ? route[2] as int : 3),
+        'mode': mode,
         'startTime': _iso(departure, ride.departure),
         'endTime': _iso(departure, ride.arrival),
         'routeShortName': route.isNotEmpty ? route[0].toString() : 'Service',
@@ -449,6 +453,8 @@ class OfflineRaptorRouter {
         // provide a useful transit alignment instead of a single endpoint
         // segment.
         'legGeometry': {'type': 'LineString', 'coordinates': geometry},
+        if (shapeGeometry.isEmpty && mode == 'BUS')
+          'geometryQuality': 'unverified',
         'intermediateStops': [
           for (var n = ride.fromIndex + 1; n < ride.toIndex; n++)
             _place(ride.trip.calls[n].stopId, stops),

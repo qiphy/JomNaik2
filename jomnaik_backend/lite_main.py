@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 import logging
+from datetime import datetime, timedelta, timezone
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
@@ -271,6 +272,39 @@ async def gtfs_departures(
         len(value["departures"]),
     )
     return value
+
+
+@app.get("/api/incidents/recent")
+async def recent_incidents(
+    limit: int = Query(default=500, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Return recent anonymous reports for client-side route risk scoring."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(503, "Reporting storage is not configured")
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/anonymous_incident_reports",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                params={
+                    "select": "station_id,station_name,station_lat,station_lon,report_type,target_type,service_route,reported_at",
+                    "reported_at": f"gte.{since}",
+                    "order": "reported_at.desc",
+                    "limit": str(limit),
+                },
+            )
+        if response.status_code != 200:
+            raise HTTPException(502, "Could not load incident reports")
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise HTTPException(502, "Incident reports returned an invalid response")
+        return {"incidents": payload, "asOf": datetime.now(timezone.utc).isoformat()}
+    except httpx.HTTPError as error:
+        raise HTTPException(503, "Incident reports are temporarily unavailable") from error
 
 
 @app.get("/api/route")

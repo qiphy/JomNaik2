@@ -7,6 +7,8 @@ RAPTOR timetable. This optional FastAPI service adds only live context:
 - TomTom road congestion for e-hailing/station access.
 - Official data.gov.my GTFS-Realtime bus and KTM vehicle positions.
 - Anonymous station-presence and incident reports stored in Supabase.
+- Recent reports can be used for conservative route-risk ranking; they do not
+  automatically cancel a service.
 
 There is no MOTIS process, GTFS import, scheduler, Databricks SDK, Lakebase
 dependency, database volume, or routing data in the deployable service.
@@ -42,6 +44,26 @@ record. The `/api/health` response reports
 redeploy the Railway service after changing variables.
 
 ### Scheduled departures
+
+`GET /api/incidents/recent` returns reports from the last 30 days using the
+server-side Supabase key. Flutter uses these reports to prefer alternatives
+with fewer nearby reports, while retaining affected services as fallbacks.
+
+### OSM road network build
+
+The Malaysia–Singapore–Brunei `.osm.pbf` source is a build input, not a
+runtime Flutter asset. With `osmium` installed, build a bounded Klang Valley
+road extract with:
+
+```sh
+bash tool/build_osm_network.sh
+```
+
+This produces `data/osm/klang-valley-bus-roads.osm.pbf` and a GeoJSON
+inspection artifact. The road extract is suitable as input to a local
+OSRM/Valhalla-style routing build or for validating bus stop snapping. The
+current Flutter app still uses its configured routing service for geometry;
+the generated PBF is not uploaded to clients.
 
 The departures endpoint reads the generated static timetable bundle from one
 of these locations:
