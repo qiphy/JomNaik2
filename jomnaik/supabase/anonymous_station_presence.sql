@@ -10,6 +10,9 @@ create table if not exists public.anonymous_station_presence (
 alter table public.anonymous_station_presence enable row level security;
 
 grant insert on public.anonymous_station_presence to authenticated;
+-- The backend writes through the Supabase service-role REST connection.
+grant insert on public.anonymous_station_presence to service_role;
+grant select on public.anonymous_station_presence to service_role;
 
 drop policy if exists "Authenticated users can add anonymous station presence"
 on public.anonymous_station_presence;

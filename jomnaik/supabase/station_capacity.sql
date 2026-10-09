@@ -6,6 +6,7 @@ create table if not exists public.station_capacity (
 );
 
 alter table public.station_capacity enable row level security;
+grant select on public.station_capacity to service_role;
 
 -- The FastAPI service reads this table using SUPABASE_SERVICE_ROLE_KEY.
 -- Insert calibrated station capacities from operational data before enabling
