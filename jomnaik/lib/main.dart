@@ -40,6 +40,9 @@ const _privacyPolicyConsentKey = 'privacy_policy_consent_version';
 const _privacyPolicyAcceptedAtKey = 'privacy_policy_accepted_at';
 const _completedJourneysKey = 'completed_journeys_v1';
 const _completedJourneyLimit = 20;
+// Temporary incident-report test hook. Remove once station selection is wired
+// to the station details sheet.
+const _temporaryIncidentReportStopId = 'rapid-kl-rail:KJ15';
 const _privacyStorage = FlutterSecureStorage();
 
 bool get _isSupabaseConfigured =>
@@ -83,15 +86,15 @@ Future<void> main() async {
       publishableKey: _supabasePublishableKey,
     );
   }
-  runApp(const JomNaikApp());
+  runApp(const JomRideApp());
 }
 
-class JomNaikApp extends StatelessWidget {
-  const JomNaikApp({super.key});
+class JomRideApp extends StatelessWidget {
+  const JomRideApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(title: 'JomNaik', home: _StartupScreen());
+    return const MaterialApp(title: 'JomRide', home: _StartupScreen());
   }
 }
 
@@ -225,10 +228,7 @@ class _MapViewState extends State<MapView> {
   _TransitStation? _nearestStation;
   int _selectedTab = 0;
 
-  bool get _canReportIncident =>
-      _isSupabaseConfigured &&
-      Supabase.instance.client.auth.currentUser != null &&
-      Supabase.instance.client.auth.currentSession != null;
+  bool get _canReportIncident => _isSupabaseConfigured;
 
   @override
   void initState() {
@@ -358,7 +358,7 @@ class _MapViewState extends State<MapView> {
 
       if (!mounted) return;
       setState(() => _dynamicStyleString = jsonEncode(styleData));
-      print('[JomNaik][map] Protomaps PMTiles style assigned');
+      print('[JomRide][map] Protomaps PMTiles style assigned');
     } catch (error) {
       debugPrint('Could not prepare offline map style: $error');
       if (mounted) {
@@ -1300,7 +1300,7 @@ class _MapViewState extends State<MapView> {
 
   /// A full e-hailing alternative is handed off to an external booking app.
   /// First-mile e-hailing followed by public transport still supports
-  /// JomNaik's guidance for its transit portion.
+  /// JomRide's guidance for its transit portion.
   bool _isDirectEhailingItinerary(Itinerary itinerary) =>
       itinerary.legs.isNotEmpty &&
       itinerary.legs.every((leg) => leg.mode.toUpperCase() == 'HAIL');
@@ -2264,7 +2264,7 @@ class _MapViewState extends State<MapView> {
 
       if (isStreetLeg && legCoordinates.isEmpty) {
         print(
-          '[JomNaik][route] Omitted ${mode.toUpperCase()} line because road '
+          '[JomRide][route] Omitted ${mode.toUpperCase()} line because road '
           'geometry was unavailable',
         );
         continue;
@@ -2391,7 +2391,7 @@ class _MapViewState extends State<MapView> {
         from['lon'] is! num ||
         to['lat'] is! num ||
         to['lon'] is! num) {
-      print('[JomNaik][route] Street leg has invalid from/to coordinates');
+      print('[JomRide][route] Street leg has invalid from/to coordinates');
       return const [];
     }
 
@@ -2402,7 +2402,7 @@ class _MapViewState extends State<MapView> {
     if (!_isSupportedCoordinate(fromLat, fromLon) ||
         !_isSupportedCoordinate(toLat, toLon)) {
       print(
-        '[JomNaik][route] Rejected street leg outside Klang Valley '
+        '[JomRide][route] Rejected street leg outside Klang Valley '
         '(from=$fromLat,$fromLon to=$toLat,$toLon)',
       );
       return const [];
@@ -2422,7 +2422,7 @@ class _MapViewState extends State<MapView> {
       '?overview=full&alternatives=true&geometries=geojson&steps=false',
     );
     print(
-      '[JomNaik][route] Requesting OSM '
+      '[JomRide][route] Requesting OSM '
       '${isWalking ? 'pedestrian' : 'street'} geometry '
       '($normalizedMode): $uri',
     );
@@ -2432,7 +2432,7 @@ class _MapViewState extends State<MapView> {
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
         print(
-          '[JomNaik][route] OSM road router failed '
+          '[JomRide][route] OSM road router failed '
           '(${response.statusCode}): ${response.body}',
         );
         return const [];
@@ -2446,7 +2446,7 @@ class _MapViewState extends State<MapView> {
         coordinates = geometry is Map ? geometry['coordinates'] : null;
       }
       if (coordinates is! List) {
-        print('[JomNaik][route] OSM road router returned no geometry');
+        print('[JomRide][route] OSM road router returned no geometry');
         return const [];
       }
       final result = <List<double>>[];
@@ -2464,7 +2464,7 @@ class _MapViewState extends State<MapView> {
       if (result.length < 2 ||
           result.any((point) => !_isSupportedCoordinate(point[1], point[0]))) {
         print(
-          '[JomNaik][route] Rejected OSM road geometry outside Klang Valley '
+          '[JomRide][route] Rejected OSM road geometry outside Klang Valley '
           '(points=${result.length})',
         );
         return const [];
@@ -2479,18 +2479,18 @@ class _MapViewState extends State<MapView> {
       );
       if (privateConnector != null) {
         print(
-          '[JomNaik][route] Using curated Sunway pedestrian connector '
+          '[JomRide][route] Using curated Sunway pedestrian connector '
           '(points=${privateConnector.length})',
         );
         return privateConnector;
       }
       print(
-        '[JomNaik][route] SUCCESS OSM road geometry '
+        '[JomRide][route] SUCCESS OSM road geometry '
         '(points=${result.length})',
       );
       return result;
     } catch (error) {
-      print('[JomNaik][route] OSM road geometry request failed: $error');
+      print('[JomRide][route] OSM road geometry request failed: $error');
       return const [];
     }
   }
@@ -2759,18 +2759,18 @@ class _MapViewState extends State<MapView> {
     _userLocationMarker = null;
     _userLocationHalo = null;
     print(
-      '[JomNaik][map] MapLibre controller created '
+      '[JomRide][map] MapLibre controller created '
       '(web=$kIsWeb, generation=$generation, styleReady=${_dynamicStyleString != null})',
     );
     print(
-      '[JomNaik][map] Initial camera target=3.1390,101.6868 zoom=12; '
+      '[JomRide][map] Initial camera target=3.1390,101.6868 zoom=12; '
       'source=Protomaps PMTiles',
     );
     try {
       await controller.getStyle();
-      print('[JomNaik][map] MapLibre style reported as loaded');
+      print('[JomRide][map] MapLibre style reported as loaded');
     } catch (error) {
-      print('[JomNaik][map] MapLibre style failed to load: $error');
+      print('[JomRide][map] MapLibre style failed to load: $error');
     }
 
     await _loadAndRenderOfflineRailLines();
@@ -3033,39 +3033,22 @@ class _MapViewState extends State<MapView> {
       _showMessage('Incident reporting is not configured yet.');
       return;
     }
-    if (_lastKnownPosition == null) await _startLocationTracking();
     if (!mounted) return;
-    final position = _lastKnownPosition;
-    if (position == null || _transitStopsById.isEmpty) {
-      _showMessage('Your location is needed to report an incident.');
-      return;
-    }
-
-    final stop = _transitStopsById.values.reduce((closest, candidate) {
-      final closestDistance = Geolocator.distanceBetween(
-        position.latitude,
-        position.longitude,
-        closest.lat,
-        closest.lon,
-      );
-      final candidateDistance = Geolocator.distanceBetween(
-        position.latitude,
-        position.longitude,
-        candidate.lat,
-        candidate.lon,
-      );
-      return candidateDistance < closestDistance ? candidate : closest;
-    });
-    final distance = Geolocator.distanceBetween(
-      position.latitude,
-      position.longitude,
-      stop.lat,
-      stop.lon,
-    );
-    if (distance > 100) {
-      _showMessage(
-        'You need to be within 100 m of a station or stop to report an incident.',
-      );
+    final stop =
+        _transitStopsById[_temporaryIncidentReportStopId] ??
+        _transitStopsById.values.firstWhere(
+          (candidate) => candidate.id.split(':').last == 'KJ15',
+          orElse: () => const _TransitStop(
+            id: _temporaryIncidentReportStopId,
+            name: 'KL SENTRAL - REDONE',
+            lat: 3.13442,
+            lon: 101.68625,
+            transitType: 'rail',
+            routes: 'Kelana Jaya Line',
+          ),
+        );
+    if (stop.transitType != 'rail') {
+      _showMessage('KL Sentral LRT station is not available for reporting.');
       return;
     }
 
@@ -3126,7 +3109,7 @@ class _MapViewState extends State<MapView> {
                 style: Theme.of(sheetContext).textTheme.titleLarge,
               ),
               const SizedBox(height: 4),
-              Text('Reporting for ${stop.name} • ${distance.round()} m away'),
+              const Text('Reporting for KL Sentral LRT station'),
               const SizedBox(height: 12),
               ..._IncidentType.values
                   .where((type) => type.isBus == isBusStop)
@@ -3284,7 +3267,7 @@ class _MapViewState extends State<MapView> {
       );
       await _updateUserLocation(position);
     } catch (error) {
-      debugPrint('[JomNaik][location] Show-my-location failed: $error');
+      debugPrint('[JomRide][location] Show-my-location failed: $error');
       if (mounted) {
         _showMessage(
           'Could not get your location. Check browser location permission.',

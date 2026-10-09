@@ -1,4 +1,4 @@
--- Run this once in the Supabase SQL editor for the jomnaik project.
+-- Run this once in the Supabase SQL editor for the jomride project.
 -- These rows intentionally contain no user ID, device ID, or raw GPS point.
 create table if not exists public.anonymous_station_presence (
   id uuid primary key default gen_random_uuid(),

@@ -8,11 +8,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:jomnaik/main.dart';
+import 'package:jomride/main.dart';
 
 void main() {
-  testWidgets('shows the jomnaik loading screen', (WidgetTester tester) async {
-    await tester.pumpWidget(const JomNaikApp());
+  testWidgets('shows the jomride loading screen', (WidgetTester tester) async {
+    await tester.pumpWidget(const JomRideApp());
 
     expect(find.byType(Image), findsOneWidget);
   });
