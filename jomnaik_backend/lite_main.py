@@ -297,6 +297,7 @@ async def _add_live_bus_departures(
     if not stop_points:
         return value
     route_ids: set[str] = set()
+    route_terminals: dict[str, set[str]] = {}
     for trip in bundle.get("trips", []):
         if not isinstance(trip, list) or len(trip) < 5:
             continue
@@ -305,7 +306,11 @@ async def _add_live_bus_departures(
             isinstance(call, list) and call and call[0] in matching_stops
             for call in calls
         ):
-            route_ids.add(str(trip[1]))
+            route_id = str(trip[1])
+            route_ids.add(route_id)
+            headsign = str(trip[3]).strip() if len(trip) > 3 else ""
+            if headsign:
+                route_terminals.setdefault(route_id, set()).add(headsign)
     try:
         live = await _vehicle_positions()
     except HTTPException:
@@ -319,7 +324,17 @@ async def _add_live_bus_departures(
             continue
         route_id = str(vehicle.get("routeId") or "")
         route_key = route_id if ":" in route_id else next(
-            (candidate for candidate in route_ids if candidate.rsplit(":", 1)[-1] == route_id),
+            (
+                candidate
+                for candidate in route_ids
+                if candidate.rsplit(":", 1)[-1] == route_id
+                or (
+                    isinstance(routes.get(candidate), list)
+                    and len(routes[candidate]) > 1
+                    and route_id
+                    in {str(routes[candidate][0]), str(routes[candidate][1])}
+                )
+            ),
             "",
         )
         if route_key not in route_ids:
@@ -352,6 +367,7 @@ async def _add_live_bus_departures(
         eta_seconds = max(90, round(distance_km * 1000 / speed_mps) + 60)
         route = routes.get(route_key, [])
         route_name = route[0] if isinstance(route, list) and route else route_key.rsplit(":", 1)[-1]
+        terminals = sorted(route_terminals.get(route_key, set()))
         estimate = {
             "route": str(route_name),
             "time": datetime.fromtimestamp(
@@ -359,7 +375,7 @@ async def _add_live_bus_departures(
             ).astimezone(_MALAYSIA).strftime("%H:%M"),
             "timestamp": now_ms + eta_seconds * 1000,
             "is_estimated": True,
-            "terminal": "",
+            "terminal": terminals[0] if terminals else "",
             "source": "data.gov.my GTFS-Realtime vehicle position",
             "vehicle_id": vehicle.get("id"),
             "vehicle_timestamp": source_timestamp,
@@ -369,14 +385,20 @@ async def _add_live_bus_departures(
             estimates_by_route[route_key] = estimate
     estimates = list(estimates_by_route.values())
     existing = value.get("departures", [])
+    # Live vehicle arrivals are the primary display. Keep the timetable only
+    # when the feed has no usable vehicle estimate for this stop.
     combined = sorted(
-        estimates + (existing if isinstance(existing, list) else []),
+        estimates if estimates else (existing if isinstance(existing, list) else []),
         key=lambda item: item.get("timestamp", 0),
     )
     return {
         **value,
         "departures": combined[: max(1, min(limit, 20))],
-        "source": "GTFS static timetable + data.gov.my GTFS-Realtime bus positions",
+        "source": (
+            "data.gov.my GTFS-Realtime bus positions"
+            if estimates
+            else "GTFS static timetable"
+        ),
         "realtimeBusConfigured": True,
     }
 
