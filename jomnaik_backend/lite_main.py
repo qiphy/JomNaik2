@@ -325,9 +325,17 @@ async def _add_live_bus_departures(
         if route_key not in route_ids:
             continue
         source_timestamp = vehicle.get("timestamp")
+        source_timestamp_ms = (
+            int(source_timestamp) * 1000
+            if isinstance(source_timestamp, (int, float))
+            and source_timestamp < 10_000_000_000
+            else int(source_timestamp)
+            if isinstance(source_timestamp, (int, float))
+            else None
+        )
         if (
-            isinstance(source_timestamp, (int, float))
-            and now_ms - int(source_timestamp) > 120_000
+            source_timestamp_ms is not None
+            and now_ms - source_timestamp_ms > 120_000
         ):
             continue
         lat, lon = vehicle.get("lat"), vehicle.get("lon")
