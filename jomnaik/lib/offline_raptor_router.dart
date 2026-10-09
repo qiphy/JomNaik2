@@ -516,16 +516,17 @@ class OfflineRaptorRouter {
         ),
       );
     } else if (finalWalk > 1000) {
-      final hailSeconds = math.max(300, (finalWalk / 9.7).round() + 180);
+      // Keep the public-transport itinerary complete with a walking final
+      // mile. _lastMileEhailingAlternatives converts this leg into an
+      // optional e-hailing alternative; it must not be the only option.
+      final walkSeconds = math.max(60, (finalWalk / 1.35).round());
       legs.add({
-        'mode': 'HAIL',
+        'mode': 'WALK',
         'startTime': _iso(departure, lastArrival),
-        'endTime': _iso(departure, lastArrival + hailSeconds),
-        'routeShortName': 'E-hailing',
-        'paymentMethod': 'Pay in the e-hailing app',
+        'endTime': _iso(departure, lastArrival + walkSeconds),
+        'routeShortName': 'Walking',
         'from': _place(last, stops),
         'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
-        'isLastMile': true,
       });
     }
     _mergeConsecutiveTransitLegs(legs);
