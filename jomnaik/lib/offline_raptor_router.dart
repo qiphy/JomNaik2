@@ -222,12 +222,20 @@ class OfflineRaptorRouter {
     double maxDistanceMeters = 800,
   }) {
     final choices = <_NearbyStop>[];
-    if (preferred != null && stops.containsKey(preferred)) {
-      final stop = stops[preferred] as List;
-      choices.add(_NearbyStop(preferred, 0));
-      // Retain the exact selected stop even if its GTFS pin is imprecise.
-      if (stop.length >= 3) return choices;
+    final preferredId = _resolveStopId(preferred, stops);
+    if (preferredId != null) {
+      final stop = stops[preferredId] as List;
+      final stopLat = (stop[1] as num).toDouble();
+      final stopLon = (stop[2] as num).toDouble();
+      choices.add(
+        _NearbyStop(preferredId, _distance(lat, lon, stopLat, stopLon).round()),
+      );
+      // A tapped transit stop is an explicit destination/origin. Do not
+      // replace it with a nearby earlier station simply because another stop
+      // has a marginally better coordinate.
+      return choices;
     }
+
     for (final entry in stops.entries) {
       final stop = entry.value;
       if (stop is! List || stop.length < 3) continue;
@@ -245,6 +253,18 @@ class OfflineRaptorRouter {
     }
     choices.sort((a, b) => a.walkSeconds.compareTo(b.walkSeconds));
     return choices.take(12).toList();
+  }
+
+  String? _resolveStopId(String? preferred, Map<String, dynamic> stops) {
+    if (preferred == null || preferred.isEmpty) return null;
+    if (stops.containsKey(preferred)) return preferred;
+    final suffix = preferred.contains(':')
+        ? preferred.substring(preferred.lastIndexOf(':') + 1)
+        : preferred;
+    for (final id in stops.keys) {
+      if (id == suffix || id.endsWith(':$suffix')) return id;
+    }
+    return null;
   }
 
   void _scanTrip(

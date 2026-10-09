@@ -88,6 +88,12 @@ curl "https://your-service.example.com/api/gtfs/stops/1005838/departures?limit=6
 `/api/health` must report `timetableConfigured: true` and non-zero
 `timetableStops` and `timetableTrips`. The departures endpoint accepts either
 the full ID (`rapid-kl-bus:1005838`) or the short GTFS ID (`1005838`).
+For bus stops, the endpoint also prepends route-matched, short-lived arrival
+estimates from the RapidKL and MRT feeder vehicle-position feeds. These are
+marked with `"is_estimated": true` and are based on the vehicle's latest
+position, speed, and distance to the stop; they are not guaranteed schedules.
+Rail stops continue to return scheduled departures because no stable RapidKL
+rail realtime feed is available.
 
 Traffic congestion is enabled only when the backend process receives a real
 `TOMTOM_API_KEY` environment variable. The example value `replace_me` is
