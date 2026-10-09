@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -41,6 +42,7 @@ SUPABASE_SERVICE_ROLE_KEY = _env_first(
     "SUPABASE_SERVICE_ROLE_KEY",
     "SUPABASE_SECRET_KEY",
 )
+_MALAYSIA = ZoneInfo("Asia/Kuala_Lumpur")
 _weather_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _traffic_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _offline_manifest_cache: tuple[float, dict[str, str]] | None = None
@@ -266,12 +268,109 @@ async def gtfs_departures(
     except (OSError, ValueError, KeyError, TypeError) as error:
         logger.exception("GTFS timetable could not be read")
         raise HTTPException(503, "GTFS timetable is temporarily unavailable") from error
+    matching_stops = {
+        key
+        for key in _load_bundle().get("stops", {})
+        if key == stop_id or key.rsplit(":", 1)[-1].casefold() == stop_id.casefold()
+    }
+    if any(key.startswith("rapid-kl-bus:") or key.startswith("rapid-kl-bus-mrtfeeder:") for key in matching_stops):
+        value = await _add_live_bus_departures(value, matching_stops, limit)
     logger.info(
         "GET /api/gtfs/stops/%s/departures returned %d departures",
         stop_id,
         len(value["departures"]),
     )
     return value
+
+
+async def _add_live_bus_departures(
+    value: dict[str, Any], matching_stops: set[str], limit: int
+) -> dict[str, Any]:
+    """Prepend route-matched bus ETAs derived from official vehicle positions."""
+    bundle = _load_bundle()
+    stops = bundle.get("stops", {})
+    stop_points = [
+        stops[key]
+        for key in matching_stops
+        if isinstance(stops.get(key), list) and len(stops[key]) >= 3
+    ]
+    if not stop_points:
+        return value
+    route_ids: set[str] = set()
+    for trip in bundle.get("trips", []):
+        if not isinstance(trip, list) or len(trip) < 5:
+            continue
+        calls = trip[4]
+        if isinstance(calls, list) and any(
+            isinstance(call, list) and call and call[0] in matching_stops
+            for call in calls
+        ):
+            route_ids.add(str(trip[1]))
+    try:
+        live = await _vehicle_positions()
+    except HTTPException:
+        return value
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    estimates_by_route: dict[str, dict[str, Any]] = {}
+    routes = bundle.get("routes", {})
+    for vehicle in live.get("vehicles", []):
+        feed = str(vehicle.get("feed", ""))
+        if feed not in {"rapid-kl-bus", "rapid-kl-bus-mrtfeeder"}:
+            continue
+        route_id = str(vehicle.get("routeId") or "")
+        route_key = route_id if ":" in route_id else next(
+            (candidate for candidate in route_ids if candidate.rsplit(":", 1)[-1] == route_id),
+            "",
+        )
+        if route_key not in route_ids:
+            continue
+        source_timestamp = vehicle.get("timestamp")
+        if (
+            isinstance(source_timestamp, (int, float))
+            and now_ms - int(source_timestamp) > 120_000
+        ):
+            continue
+        lat, lon = vehicle.get("lat"), vehicle.get("lon")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        distance_km = min(
+            _distance_km(lat, lon, float(stop[1]), float(stop[2]))
+            for stop in stop_points
+        )
+        if distance_km > 8:
+            continue
+        speed = vehicle.get("speedMps")
+        speed_mps = float(speed) if isinstance(speed, (int, float)) and speed > 2 else 8.0
+        eta_seconds = max(90, round(distance_km * 1000 / speed_mps) + 60)
+        route = routes.get(route_key, [])
+        route_name = route[0] if isinstance(route, list) and route else route_key.rsplit(":", 1)[-1]
+        estimate = {
+            "route": str(route_name),
+            "time": datetime.fromtimestamp(
+                (now_ms + eta_seconds * 1000) / 1000, tz=timezone.utc
+            ).astimezone(_MALAYSIA).strftime("%H:%M"),
+            "timestamp": now_ms + eta_seconds * 1000,
+            "is_estimated": True,
+            "terminal": "",
+            "source": "data.gov.my GTFS-Realtime vehicle position",
+            "vehicle_id": vehicle.get("id"),
+            "vehicle_timestamp": source_timestamp,
+        }
+        previous = estimates_by_route.get(route_key)
+        if previous is None or estimate["timestamp"] < previous["timestamp"]:
+            estimates_by_route[route_key] = estimate
+    estimates = list(estimates_by_route.values())
+    existing = value.get("departures", [])
+    combined = sorted(
+        estimates + (existing if isinstance(existing, list) else []),
+        key=lambda item: item.get("timestamp", 0),
+    )
+    return {
+        **value,
+        "departures": combined[: max(1, min(limit, 20))],
+        "source": "GTFS static timetable + data.gov.my GTFS-Realtime bus positions",
+        "realtimeBusConfigured": True,
+    }
 
 
 @app.get("/api/incidents/recent")
