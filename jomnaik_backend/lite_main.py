@@ -15,8 +15,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from tomtom import TomTomTrafficError, fetch_congestion
@@ -85,11 +86,23 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def _unhandled_api_error(request: Request, error: Exception) -> JSONResponse:
+    """Keep browser clients from seeing an opaque CORS error for server faults."""
+    logger.exception("Unhandled API error for %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "The backend could not process this request."},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
 async def _insert(table: str, body: dict[str, Any]) -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(503, "Reporting storage is not configured")
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
             f"{SUPABASE_URL}/rest/v1/{table}",
             headers={
                 "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -97,9 +110,18 @@ async def _insert(table: str, body: dict[str, Any]) -> None:
                 "Content-Type": "application/json",
                 "Prefer": "return=minimal",
             },
-            json=body,
-        )
+                json=body,
+            )
+    except httpx.HTTPError as error:
+        logger.exception("Could not reach Supabase table %s", table)
+        raise HTTPException(503, "Reporting storage is temporarily unavailable") from error
     if response.status_code not in {200, 201, 204}:
+        logger.error(
+            "Supabase rejected write to %s with status %s: %s",
+            table,
+            response.status_code,
+            response.text[:300],
+        )
         raise HTTPException(502, "Could not save the report")
 
 
