@@ -40,9 +40,6 @@ const _privacyPolicyConsentKey = 'privacy_policy_consent_version';
 const _privacyPolicyAcceptedAtKey = 'privacy_policy_accepted_at';
 const _completedJourneysKey = 'completed_journeys_v1';
 const _completedJourneyLimit = 20;
-// Temporary incident-report test hook. Remove once station selection is wired
-// to the station details sheet.
-const _temporaryIncidentReportStopId = 'rapid-kl-rail:KJ15';
 const _privacyStorage = FlutterSecureStorage();
 
 enum _StartChoice { currentLocation, search, map }
@@ -3183,22 +3180,38 @@ class _MapViewState extends State<MapView> {
       _showMessage('Incident reporting is not configured yet.');
       return;
     }
+    if (_lastKnownPosition == null) await _startLocationTracking();
     if (!mounted) return;
-    final stop =
-        _transitStopsById[_temporaryIncidentReportStopId] ??
-        _transitStopsById.values.firstWhere(
-          (candidate) => candidate.id.split(':').last == 'KJ15',
-          orElse: () => const _TransitStop(
-            id: _temporaryIncidentReportStopId,
-            name: 'KL SENTRAL - REDONE',
-            lat: 3.13442,
-            lon: 101.68625,
-            transitType: 'rail',
-            routes: 'Kelana Jaya Line',
-          ),
-        );
-    if (stop.transitType != 'rail') {
-      _showMessage('KL Sentral LRT station is not available for reporting.');
+    final position = _lastKnownPosition;
+    if (position == null || _transitStopsById.isEmpty) {
+      _showMessage('Your location is needed to report an incident.');
+      return;
+    }
+    final stop = _transitStopsById.values.reduce((closest, candidate) {
+      final closestDistance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        closest.lat,
+        closest.lon,
+      );
+      final candidateDistance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        candidate.lat,
+        candidate.lon,
+      );
+      return candidateDistance < closestDistance ? candidate : closest;
+    });
+    final distance = Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      stop.lat,
+      stop.lon,
+    );
+    if (distance > 100) {
+      _showMessage(
+        'You need to be within 100 m of a station or stop to report an incident.',
+      );
       return;
     }
 
@@ -3259,7 +3272,7 @@ class _MapViewState extends State<MapView> {
                 style: Theme.of(sheetContext).textTheme.titleLarge,
               ),
               const SizedBox(height: 4),
-              const Text('Reporting for KL Sentral LRT station'),
+              Text('Reporting for ${stop.name} • ${distance.round()} m away'),
               const SizedBox(height: 12),
               ..._IncidentType.values
                   .where((type) => type.isBus == isBusStop)
