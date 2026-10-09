@@ -45,6 +45,8 @@ const _completedJourneyLimit = 20;
 const _temporaryIncidentReportStopId = 'rapid-kl-rail:KJ15';
 const _privacyStorage = FlutterSecureStorage();
 
+enum _StartChoice { currentLocation, search, map }
+
 bool get _isSupabaseConfigured =>
     _supabaseUrl.isNotEmpty && _supabasePublishableKey.isNotEmpty;
 
@@ -222,6 +224,7 @@ class _MapViewState extends State<MapView> {
   final Map<String, _TimedCache<List<StationIncident>>> _incidentCache = {};
   final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
   bool _isSearchOpen = true;
+  Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
   List<_TransitStation> _railStations = const [];
   Map<String, _TransitStop> _transitStopsById = const {};
@@ -754,19 +757,21 @@ class _MapViewState extends State<MapView> {
       _showUnsupportedZone();
       return;
     }
-    final useCurrentLocation = await _chooseCurrentOrManualStart();
-    if (useCurrentLocation == null) return;
+    final startChoice = await _chooseCurrentOrManualStart();
+    if (startChoice == null) return;
     Position? origin;
     PlaceSearchResult? selectedStart;
-    if (useCurrentLocation) {
+    if (startChoice == _StartChoice.currentLocation) {
       await _startLocationTracking();
       origin = _lastKnownPosition;
       if (origin == null) {
         _showMessage('Could not get your current location.');
         return;
       }
-    } else {
+    } else if (startChoice == _StartChoice.search) {
       selectedStart = await _askForStartLocation();
+    } else {
+      selectedStart = await _pickStartFromMap();
     }
     if (origin == null && selectedStart == null) return;
     final originLat = origin?.latitude ?? selectedStart!.lat;
@@ -786,8 +791,8 @@ class _MapViewState extends State<MapView> {
     await _showRouteChoices(routeData);
   }
 
-  Future<bool?> _chooseCurrentOrManualStart() {
-    return showModalBottomSheet<bool>(
+  Future<_StartChoice?> _chooseCurrentOrManualStart() {
+    return showModalBottomSheet<_StartChoice>(
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
@@ -803,7 +808,8 @@ class _MapViewState extends State<MapView> {
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
-                onPressed: () => Navigator.of(context).pop(true),
+                onPressed: () =>
+                    Navigator.of(context).pop(_StartChoice.currentLocation),
                 icon: const Icon(Icons.my_location),
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(
@@ -818,7 +824,7 @@ class _MapViewState extends State<MapView> {
               ),
               const SizedBox(height: 14),
               OutlinedButton.icon(
-                onPressed: () => Navigator.of(context).pop(false),
+                onPressed: () => Navigator.of(context).pop(_StartChoice.search),
                 icon: const Icon(Icons.search),
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(
@@ -831,11 +837,85 @@ class _MapViewState extends State<MapView> {
                   style: TextStyle(fontSize: 18),
                 ),
               ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).pop(_StartChoice.map),
+                icon: const Icon(Icons.map_outlined),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
+                ),
+                label: const Text(
+                  'Select from map',
+                  style: TextStyle(fontSize: 18),
+                ),
+              ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Future<PlaceSearchResult?> _pickStartFromMap() async {
+    final picker = Completer<PlaceSearchResult?>();
+    _mapStartPicker = picker;
+    if (mounted) {
+      _showMessage('Tap the map to select your starting point.');
+    }
+    final result = await picker.future;
+    if (identical(_mapStartPicker, picker)) _mapStartPicker = null;
+    return result;
+  }
+
+  Future<void> _handleMapStartPick(dynamic point, LatLng coordinate) async {
+    final picker = _mapStartPicker;
+    if (picker == null || picker.isCompleted) return;
+    if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
+      _showUnsupportedZone();
+      return;
+    }
+    final features = await _mapController?.queryRenderedFeatures(point, [
+      'rail_stop_hit_targets_layer',
+      'bus_stop_hit_targets_layer',
+      'rail_stops_layer',
+      'transit_stops_layer',
+    ], null);
+    if (features != null && features.isNotEmpty) {
+      final feature = features.first;
+      final properties = feature is Map && feature['properties'] is Map
+          ? feature['properties'] as Map
+          : null;
+      final stopId = properties?['id']?.toString();
+      final stop = stopId == null ? null : _transitStopsById[stopId];
+      if (stop != null) {
+        final shouldUseStop = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Use this station or stop?'),
+            content: Text(stop.name),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Set as start'),
+              ),
+            ],
+          ),
+        );
+        if (shouldUseStop == true && !picker.isCompleted) {
+          picker.complete(stop.asPlaceSearchResult());
+        }
+        return;
+      }
+    }
+    final place = await _reverseGeocodePlace(coordinate);
+    if (!picker.isCompleted) picker.complete(place);
   }
 
   Future<PlaceSearchResult?> _askForStartLocation() async {
@@ -1029,8 +1109,6 @@ class _MapViewState extends State<MapView> {
     final signals = <String>[
       if (sheltered) 'Sheltered walkways',
       if (hasBusyStation) 'Busy station reported',
-      if (itinerary['incidentRiskLabel'] is String)
-        itinerary['incidentRiskLabel'] as String,
     ];
     return signals.isEmpty ? summary : '$summary • ${signals.join(' • ')}';
   }
@@ -1039,8 +1117,15 @@ class _MapViewState extends State<MapView> {
     if (itinerary.fareMin != null && itinerary.fareMax != null) {
       return 'RM${itinerary.fareMin!.toStringAsFixed(2)}–RM${itinerary.fareMax!.toStringAsFixed(2)}';
     }
+
     final fare = itinerary.fareAmount;
     return fare == null ? '' : 'RM${fare.toStringAsFixed(2)}';
+  }
+
+  String _incidentStatusLabel(int count) {
+    if (count >= 3) return 'High incident status';
+    if (count == 2) return 'Medium incident status';
+    return 'Low incident status';
   }
 
   String _formatDuration(num seconds) {
@@ -1199,7 +1284,22 @@ class _MapViewState extends State<MapView> {
                 final option = Itinerary.fromJson(itinerary);
                 return Card(
                   child: ListTile(
-                    leading: Icon(_routeOptionIcon(itinerary)),
+                    leading: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(_routeOptionIcon(itinerary)),
+                        if (option.legs.any(
+                          (leg) => leg.incidentReports.isNotEmpty,
+                        )) ...[
+                          const SizedBox(width: 4),
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.orange,
+                            size: 20,
+                          ),
+                        ],
+                      ],
+                    ),
                     title: Text(_routeOptionTitle(itinerary)),
                     subtitle: Text(_routeOptionSummary(itinerary)),
                     trailing: Column(
@@ -1781,8 +1881,29 @@ class _MapViewState extends State<MapView> {
           if (raw is! Map) return raw;
           final itinerary = Map<String, dynamic>.from(raw);
           final risk = _incidentRiskForItinerary(itinerary, incidents);
+          final incidentDelaySeconds = _incidentDelaySeconds(
+            itinerary,
+            incidents,
+          );
+          final legs = itinerary['legs'];
+          if (legs is List) {
+            itinerary['legs'] = legs.map((rawLeg) {
+              if (rawLeg is! Map) return rawLeg;
+              final leg = Map<String, dynamic>.from(rawLeg);
+              final matches = _incidentsForLeg(leg, incidents);
+              if (matches.isNotEmpty) leg['incidentReports'] = matches;
+              return leg;
+            }).toList();
+          }
           return {
             ...itinerary,
+            if (incidentDelaySeconds > 0) ...{
+              'baseDuration': itinerary['duration'],
+              'incidentDelaySeconds': incidentDelaySeconds,
+              'duration':
+                  (itinerary['duration'] as num? ?? 0).toInt() +
+                  incidentDelaySeconds,
+            },
             'incidentRiskScore': risk.score,
             if (risk.count > 0)
               'incidentRiskLabel':
@@ -1797,6 +1918,90 @@ class _MapViewState extends State<MapView> {
     }
   }
 
+  int _incidentDelaySeconds(
+    Map<String, dynamic> itinerary,
+    List<Map> incidents,
+  ) {
+    final seen = <String>{};
+    var delay = 0;
+    for (final leg in _itineraryLegs(itinerary)) {
+      for (final incident in _incidentsForLeg(leg, incidents)) {
+        final key =
+            '${incident['stationName']}|${incident['type']}|${incident['route']}|${incident['reportedAt']}';
+        if (!seen.add(key)) continue;
+        final reportedAt = DateTime.tryParse(
+          incident['reportedAt']?.toString() ?? '',
+        );
+        final age = reportedAt == null
+            ? const Duration(days: 30)
+            : DateTime.now().toUtc().difference(reportedAt.toUtc());
+        final contribution = age <= const Duration(hours: 1)
+            ? 300
+            : age <= const Duration(hours: 6)
+            ? 180
+            : age <= const Duration(days: 1)
+            ? 90
+            : 30;
+        delay += contribution;
+      }
+    }
+    return delay.clamp(0, 900);
+  }
+
+  List<Map<String, dynamic>> _incidentsForLeg(
+    Map<String, dynamic> leg,
+    List<Map> incidents,
+  ) {
+    final mode = leg['mode']?.toString().toUpperCase();
+    if (mode == 'WALK' || mode == 'HAIL') return const [];
+    final route = leg['routeShortName']?.toString().trim().toLowerCase();
+    final points = <Map>[];
+    if (leg['from'] is Map) points.add(leg['from'] as Map);
+    if (leg['intermediateStops'] is List) {
+      points.addAll((leg['intermediateStops'] as List).whereType<Map>());
+    }
+    if (leg['to'] is Map) points.add(leg['to'] as Map);
+    final matches = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final incident in incidents) {
+      final lat = (incident['station_lat'] as num?)?.toDouble();
+      final lon = (incident['station_lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final incidentRoute = incident['service_route']
+          ?.toString()
+          .trim()
+          .toLowerCase();
+      final routeMatches =
+          incidentRoute == null ||
+          incidentRoute.isEmpty ||
+          route == null ||
+          route == incidentRoute;
+      if (!routeMatches) continue;
+      final nearStop = points.any((point) {
+        final pointLat = (point['lat'] as num?)?.toDouble();
+        final pointLon = (point['lon'] as num?)?.toDouble();
+        return pointLat != null &&
+            pointLon != null &&
+            Geolocator.distanceBetween(pointLat, pointLon, lat, lon) <= 180;
+      });
+      if (!nearStop) continue;
+      final stationName =
+          incident['station_name']?.toString() ?? 'Affected station';
+      final type = incident['report_type']?.toString() ?? 'disruption';
+      final routeName = incident['service_route']?.toString();
+      final key =
+          '${stationName.toLowerCase()}|${type.toLowerCase()}|${routeName?.toLowerCase() ?? ''}|${incident['reported_at'] ?? ''}';
+      if (!seen.add(key)) continue;
+      matches.add({
+        'stationName': stationName,
+        'type': type,
+        'route': routeName,
+        'reportedAt': incident['reported_at']?.toString(),
+      });
+    }
+    return matches;
+  }
+
   ({double score, int count, List<String> reports}) _incidentRiskForItinerary(
     Map<String, dynamic> itinerary,
     List<Map> incidents,
@@ -1805,48 +2010,17 @@ class _MapViewState extends State<MapView> {
     var count = 0;
     final reports = <String>[];
     for (final leg in _itineraryLegs(itinerary)) {
-      final mode = leg['mode']?.toString().toUpperCase();
-      if (mode == 'WALK' || mode == 'HAIL') continue;
-      final route = leg['routeShortName']?.toString().trim().toLowerCase();
-      final points = <Map>[];
-      if (leg['from'] is Map) points.add(leg['from'] as Map);
-      if (leg['intermediateStops'] is List) {
-        points.addAll((leg['intermediateStops'] as List).whereType<Map>());
-      }
-      if (leg['to'] is Map) points.add(leg['to'] as Map);
-      for (final incident in incidents) {
-        final lat = (incident['station_lat'] as num?)?.toDouble();
-        final lon = (incident['station_lon'] as num?)?.toDouble();
-        if (lat == null || lon == null) continue;
-        final incidentRoute = incident['service_route']
-            ?.toString()
-            .trim()
-            .toLowerCase();
-        final routeMatches =
-            incidentRoute == null ||
-            incidentRoute.isEmpty ||
-            route == null ||
-            route == incidentRoute;
-        if (!routeMatches) continue;
-        final nearStop = points.any((point) {
-          final pointLat = (point['lat'] as num?)?.toDouble();
-          final pointLon = (point['lon'] as num?)?.toDouble();
-          return pointLat != null &&
-              pointLon != null &&
-              Geolocator.distanceBetween(pointLat, pointLon, lat, lon) <= 180;
-        });
-        if (nearStop) {
-          count++;
-          score += incidentRoute == null || incidentRoute.isEmpty ? 1.0 : 1.5;
-          final station = incident['station_name']?.toString();
-          final reportType = incident['report_type']?.toString();
-          final detail = [
-            if (reportType != null && reportType.isNotEmpty) reportType,
-            if (station != null && station.isNotEmpty) 'near $station',
-          ].join(' ');
-          if (detail.isNotEmpty && !reports.contains(detail)) {
-            reports.add(detail);
-          }
+      for (final incident in _incidentsForLeg(leg, incidents)) {
+        count++;
+        score += incident['route'] == null ? 1.0 : 1.5;
+        final station = incident['stationName']?.toString();
+        final reportType = incident['type']?.toString();
+        final detail = [
+          if (reportType != null && reportType.isNotEmpty) reportType,
+          if (station != null && station.isNotEmpty) 'near $station',
+        ].join(' ');
+        if (detail.isNotEmpty && !reports.contains(detail)) {
+          reports.add(detail);
         }
       }
     }
@@ -4070,13 +4244,24 @@ class _MapViewState extends State<MapView> {
         : distance < 1000
         ? '${distance.round()} m away'
         : '${(distance / 1000).toStringAsFixed(1)} km away';
+    final crowdFuture = station == null ? null : _fetchStationCrowd(station.id);
 
     return Card(
       elevation: 4,
       child: ListTile(
         leading: const CircleAvatar(child: Icon(Icons.train)),
         title: const Text('Nearest station'),
-        subtitle: Text(station?.name ?? distanceLabel),
+        subtitle: station == null
+            ? Text(distanceLabel)
+            : FutureBuilder<_StationCrowd>(
+                future: crowdFuture,
+                builder: (context, snapshot) {
+                  final crowd = snapshot.data;
+                  return Text(
+                    '${station.name} • ${crowd?.label ?? 'Crowd level unavailable'}',
+                  );
+                },
+              ),
         trailing: station == null
             ? const SizedBox(
                 width: 20,
@@ -4090,6 +4275,23 @@ class _MapViewState extends State<MapView> {
         onTap: station == null ? null : _focusNearestStation,
       ),
     );
+  }
+
+  Future<_StationCrowd> _fetchStationCrowd(String stationId) async {
+    final response = await _httpClient
+        .get(
+          Uri.parse(
+            '$_backendBaseUrl/api/stations/${Uri.encodeComponent(stationId)}/crowd',
+          ),
+          headers: await backendHeaders(),
+        )
+        .timeout(const Duration(seconds: 8));
+    if (response.statusCode != 200) {
+      throw StateError('Could not load crowd level');
+    }
+    final data = jsonDecode(response.body);
+    if (data is! Map) throw const FormatException('Invalid crowd response');
+    return _StationCrowd.fromJson(Map<String, dynamic>.from(data));
   }
 
   @override
@@ -4198,6 +4400,8 @@ class _MapViewState extends State<MapView> {
                         // keyed to the visible map centre, not device GPS.
                         trackCameraPosition: true,
                         onMapCreated: _onMapCreated,
+                        onMapClick: (point, coordinate) =>
+                            _handleMapStartPick(point, coordinate),
                         onMapLongClick: (_, coordinate) =>
                             _showLongPressedLocation(coordinate),
                         onCameraMove: _onCameraMove,
@@ -4585,16 +4789,9 @@ class _MapViewState extends State<MapView> {
                                           ),
                                         ),
                                         if (leg.incidentReports.isNotEmpty)
-                                          IconButton(
-                                            visualDensity:
-                                                VisualDensity.compact,
-                                            tooltip: 'View recent reports',
-                                            icon: const Icon(
-                                              Icons.warning_amber_rounded,
-                                              color: Colors.orange,
-                                            ),
-                                            onPressed: () =>
-                                                _showLegIncidents(leg),
+                                          const Icon(
+                                            Icons.warning_amber_rounded,
+                                            color: Colors.orange,
                                           ),
                                       ],
                                     ),
@@ -4636,6 +4833,22 @@ class _MapViewState extends State<MapView> {
                                           'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
                                         ),
                                       ),
+                                      if (leg.incidentReports.isNotEmpty)
+                                        ListTile(
+                                          dense: true,
+                                          leading: const Icon(
+                                            Icons.warning_amber_rounded,
+                                            color: Colors.orange,
+                                          ),
+                                          title: Text(
+                                            _incidentStatusLabel(
+                                              leg.incidentReports.length,
+                                            ),
+                                          ),
+                                          subtitle: Text(
+                                            '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'} • ${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
+                                          ),
+                                        ),
                                       if (leg.intermediateStops.isEmpty)
                                         const Padding(
                                           padding: EdgeInsets.fromLTRB(
@@ -5699,6 +5912,23 @@ class _TrafficCongestion {
         : ' • Station ${stationLevel ?? 'occupancy'}: $observedUsers/$capacity';
     return 'Congestion Status: $roadStatus • ${currentSpeedKph.round()} km/h$delay$presence';
   }
+}
+
+class _StationCrowd {
+  const _StationCrowd({required this.level});
+
+  factory _StationCrowd.fromJson(Map<String, dynamic> json) {
+    return _StationCrowd(level: json['level']?.toString() ?? 'unavailable');
+  }
+
+  final String level;
+
+  String get label => switch (level) {
+    'high' => 'High crowd level',
+    'medium' => 'Medium crowd level',
+    'low' => 'Low crowd level',
+    _ => 'Crowd level unavailable',
+  };
 }
 
 class StationIncident {

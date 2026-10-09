@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -37,7 +38,18 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-SUPABASE_URL = _env_first("SUPABASE_URL").rstrip("/")
+def _supabase_url() -> str:
+    """Normalize a Supabase project URL supplied through deployment variables."""
+    value = _env_first("SUPABASE_URL").rstrip("/")
+    if value and "://" not in value:
+        value = f"https://{value}"
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return value
+
+
+SUPABASE_URL = _supabase_url()
 SUPABASE_ANON_KEY = _env_first("SUPABASE_ANON_KEY", "SUPABASE_PUBLISHABLE_KEY")
 SUPABASE_SERVICE_ROLE_KEY = _env_first(
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -555,6 +567,62 @@ async def traffic(
         lon,
     )
     return value
+
+
+@app.get("/api/stations/{station_id}/crowd")
+async def station_crowd(station_id: str) -> dict[str, Any]:
+    """Estimate crowd level from recent anonymous station-presence reports."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(503, "Crowd data is not configured")
+    since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"******",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            presence_response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/anonymous_station_presence",
+                headers=headers,
+                params={
+                    "select": "station_id,observed_at",
+                    "station_id": f"eq.{station_id}",
+                    "observed_at": f"gte.{since}",
+                },
+            )
+            presence_response.raise_for_status()
+            capacity_response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/station_capacity",
+                headers=headers,
+                params={
+                    "select": "capacity",
+                    "station_id": f"eq.{station_id}",
+                    "limit": "1",
+                },
+            )
+            capacity = None
+            if capacity_response.status_code == 200:
+                rows = capacity_response.json()
+                if rows and isinstance(rows[0], dict):
+                    capacity = rows[0].get("capacity")
+    except httpx.HTTPError as error:
+        logger.exception("Could not read crowd data for station %s", station_id)
+        raise HTTPException(503, "Crowd data is temporarily unavailable") from error
+    rows = presence_response.json()
+    observed_users = len(rows) if isinstance(rows, list) else 0
+    if isinstance(capacity, int) and capacity > 0:
+        ratio = observed_users / capacity
+        level = "high" if ratio >= 0.7 else "medium" if ratio >= 0.3 else "low"
+    else:
+        level = "high" if observed_users >= 10 else "medium" if observed_users >= 4 else "low"
+    return {
+        "stationId": station_id,
+        "level": level,
+        "observedUsers": observed_users,
+        "capacity": capacity,
+        "windowMinutes": 30,
+        "confidence": "low" if capacity is None else "medium",
+    }
 
 
 @app.post("/api/station-presence", status_code=202)

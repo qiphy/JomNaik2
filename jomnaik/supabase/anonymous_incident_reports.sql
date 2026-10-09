@@ -13,6 +13,8 @@ create table if not exists public.anonymous_incident_reports (
 
 alter table public.anonymous_incident_reports enable row level security;
 grant insert on public.anonymous_incident_reports to authenticated;
+-- The backend writes through the Supabase service-role REST connection.
+grant insert on public.anonymous_incident_reports to service_role;
 
 drop policy if exists "Authenticated users can add anonymous incident reports"
 on public.anonymous_incident_reports;
