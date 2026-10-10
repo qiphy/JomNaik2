@@ -3059,7 +3059,10 @@ class _MapViewState extends State<MapView> {
 
     try {
       final position = await Geolocator.getCurrentPosition(
-        locationSettings: settings,
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 12),
+        ),
       );
       await _updateUserLocation(position);
       return position;
@@ -3494,24 +3497,51 @@ class _MapViewState extends State<MapView> {
     final controller = _mapController;
     if (controller == null) return;
 
-    Position? position;
-    try {
-      // Request permission and fetch the position once; this also starts the
-      // ongoing location stream used by the rest of the app.
-      position = await _startLocationTracking();
-    } catch (error) {
-      debugPrint('[JomRide][location] Show-my-location failed: $error');
-      if (mounted) {
-        _showMessage(
-          'Could not get your location. Check browser location permission.',
-        );
+    // The position stream is started with the map and continually keeps this
+    // value fresh. Use it immediately so a button tap recentres without
+    // waiting for another high-accuracy GPS fix (which can be slow on mobile).
+    var position = _lastKnownPosition;
+    if (position == null) {
+      // iOS may have a recent system fix even before the app's position stream
+      // has delivered its first event.
+      try {
+        position = await Geolocator.getLastKnownPosition();
+        if (position != null) _lastKnownPosition = position;
+      } catch (error) {
+        debugPrint('[JomRide][location] Last-known lookup failed: $error');
       }
     }
-    if (!mounted || position == null) return;
+    if (position == null) {
+      try {
+        // First use still needs to request permission and obtain a fix.
+        position = await _startLocationTracking() ?? _lastKnownPosition;
+      } catch (error) {
+        debugPrint('[JomRide][location] Show-my-location failed: $error');
+      }
+    }
+    if (!mounted ||
+        position == null ||
+        !identical(controller, _mapController)) {
+      return;
+    }
 
-    final location = LatLng(position.latitude, position.longitude);
-    await _renderUserLocation(controller, position);
-    await controller.animateCamera(CameraUpdate.newLatLngZoom(location, 16));
+    try {
+      // iOS MapLibre's move API is synchronous at the platform boundary;
+      // using it avoids animation requests being dropped while the native
+      // map is resuming location/render work after a touch.
+      await controller.moveCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(position.latitude, position.longitude),
+          16,
+        ),
+      );
+      // The GPS stream also renders this marker; keep an explicit render here
+      // for the first tap if its initial stream event has not arrived yet.
+      await _renderUserLocation(controller, position);
+    } catch (error) {
+      debugPrint('[JomRide][location] Center-on-location failed: $error');
+      if (mounted) _showMessage('Could not move the map to your location.');
+    }
   }
 
   Future<void> _showNorth() async {
@@ -3521,16 +3551,12 @@ class _MapViewState extends State<MapView> {
       // maplibre_gl's web implementation throws UnimplementedError for
       // queryCameraPosition, so web must use the camera callback we track.
       // Native versions can query the live camera and fall back to that cache.
-      final camera = kIsWeb
-          ? _lastCameraPosition ??
-                const CameraPosition(target: LatLng(3.1390, 101.6868), zoom: 12)
-          : await controller.queryCameraPosition() ??
-                _lastCameraPosition ??
-                const CameraPosition(
-                  target: LatLng(3.1390, 101.6868),
-                  zoom: 12,
-                );
-      await controller.animateCamera(
+      // The tracked camera is available on all platforms and avoids a native
+      // query round-trip that can race with iOS touch/camera updates.
+      final camera =
+          _lastCameraPosition ??
+          const CameraPosition(target: LatLng(3.1390, 101.6868), zoom: 12);
+      await controller.moveCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: camera.target,
@@ -4751,12 +4777,13 @@ class _MapViewState extends State<MapView> {
                         ),
                       if (_currentItinerary != null)
                         Positioned.fill(
-                          child: GestureDetector(
+                          // Keep a hit-test target above the native map while
+                          // leaving drag recognition to the itinerary sheet.
+                          // A scale GestureDetector here competes with the
+                          // sheet's vertical drag on mobile platform views.
+                          child: Listener(
                             behavior: HitTestBehavior.opaque,
-                            onTap: () {},
-                            onScaleStart: (_) {},
-                            onScaleUpdate: (_) {},
-                            onScaleEnd: (_) {},
+                            onPointerDown: (_) {},
                           ),
                         ),
                       if (_currentItinerary != null)
@@ -5114,22 +5141,30 @@ class _MapViewState extends State<MapView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  FloatingActionButton.small(
-                    heroTag: 'show-north',
+                  IconButton.filledTonal(
                     onPressed: _showNorth,
                     tooltip: 'Show north',
-                    backgroundColor: const Color(0xFFD8B4FE),
-                    foregroundColor: Colors.black,
-                    child: const Icon(Icons.navigation, color: Colors.black),
+                    iconSize: 20,
+                    style: IconButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                      backgroundColor: const Color(0xFFD8B4FE),
+                      foregroundColor: Colors.black,
+                      padding: EdgeInsets.zero,
+                    ),
+                    icon: const Icon(Icons.navigation),
                   ),
                   const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    heroTag: 'my-location',
+                  IconButton.filledTonal(
                     onPressed: _showMyLocation,
                     tooltip: 'Show my location',
-                    backgroundColor: const Color(0xFFD8B4FE),
-                    foregroundColor: Colors.black,
-                    child: const Icon(Icons.my_location, color: Colors.black),
+                    iconSize: 20,
+                    style: IconButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                      backgroundColor: const Color(0xFFD8B4FE),
+                      foregroundColor: Colors.black,
+                      padding: EdgeInsets.zero,
+                    ),
+                    icon: const Icon(Icons.my_location),
                   ),
                 ],
               )
