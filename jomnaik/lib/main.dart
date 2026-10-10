@@ -226,7 +226,6 @@ class _MapViewState extends State<MapView> {
   final Map<String, _TimedCache<List<StopDeparture>>> _departureCache = {};
   final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
   bool _isSearchOpen = true;
-  bool _isStopDetailsOpen = false;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
   List<_TransitStation> _railStations = const [];
@@ -723,33 +722,12 @@ class _MapViewState extends State<MapView> {
     try {
       final place = await _reverseGeocodePlace(coordinate);
       if (!mounted) return;
-      await showModalBottomSheet<void>(
-        context: context,
-        showDragHandle: true,
-        builder: (context) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(place.name, style: Theme.of(context).textTheme.titleLarge),
-                const SizedBox(height: 8),
-                Text(place.address),
-                const SizedBox(height: 20),
-                FilledButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    _getDirectionsToPlace(place);
-                  },
-                  icon: const Icon(Icons.directions),
-                  label: const Text('Directions'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
+      FocusScope.of(context).unfocus();
+      setState(() {
+        _selectedPlace = place;
+        _placeSearchResults = const [];
+        _isSearchOpen = true;
+      });
     } catch (_) {
       if (mounted) _showMessage('Could not look up that map location.');
     }
@@ -911,7 +889,6 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _handleMapStartPick(dynamic point, LatLng coordinate) async {
-    if (_areMapActionsBlocked) return;
     final picker = _mapStartPicker;
     if (picker == null || picker.isCompleted) return;
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
@@ -3121,7 +3098,6 @@ class _MapViewState extends State<MapView> {
       layerId,
       annotation,
     ) {
-      if (_areMapActionsBlocked) return;
       _queryTappedFeature(point);
     });
   }
@@ -3740,7 +3716,6 @@ class _MapViewState extends State<MapView> {
     required String transitType,
     _TransitStop? stop,
   }) {
-    if (mounted) setState(() => _isStopDetailsOpen = true);
     Future<List<StopDeparture>> departureFuture = _fetchNextDepartures(stopId);
     Future<_TrafficCongestion?> congestionFuture = stop == null
         ? Future.value(null)
@@ -3773,7 +3748,15 @@ class _MapViewState extends State<MapView> {
               });
             });
           }
-          return SafeArea(
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            // Keep drags that start on the station card from reaching the
+            // native map view underneath. The inner scroll view handles its
+            // own vertical scrolling.
+            onPanStart: (_) {},
+            onPanUpdate: (_) {},
+            onPanEnd: (_) {},
+            child: SafeArea(
             child: SizedBox(
               width: double.infinity,
               child: Padding(
@@ -3824,7 +3807,8 @@ class _MapViewState extends State<MapView> {
                           );
                           final reportLevel = snapshot.hasError
                               ? 'Unavailable'
-                              : snapshot.connectionState != ConnectionState.done
+                                : snapshot.connectionState !=
+                                      ConnectionState.done
                               ? 'Loading'
                               : _incidentStatusLabel(reportCount);
                           final reportColor = snapshot.hasError
@@ -3836,7 +3820,8 @@ class _MapViewState extends State<MapView> {
                               : Colors.green;
                           final reportMessage = snapshot.hasError
                               ? 'Incident report level unavailable.'
-                              : snapshot.connectionState != ConnectionState.done
+                                : snapshot.connectionState !=
+                                      ConnectionState.done
                               ? 'Loading recent reports…'
                               : reportCount == 0
                               ? 'No reports in the last 15 minutes.'
@@ -3873,7 +3858,9 @@ class _MapViewState extends State<MapView> {
                                   const SizedBox(height: 8),
                                   ...currentIncidents.map(
                                     (incident) => Padding(
-                                      padding: const EdgeInsets.only(bottom: 4),
+                                        padding: const EdgeInsets.only(
+                                          bottom: 4,
+                                        ),
                                       child: Text(
                                         '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
                                       ),
@@ -3906,12 +3893,16 @@ class _MapViewState extends State<MapView> {
                               ConnectionState.done) {
                             return const Padding(
                               padding: EdgeInsets.symmetric(vertical: 16),
-                              child: Center(child: CircularProgressIndicator()),
+                                child: Center(
+                                  child: CircularProgressIndicator(),
+                                ),
                             );
                           }
                           if (snapshot.hasError) {
                             return Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
                               child: Row(
                                 children: [
                                   const Expanded(
@@ -3971,7 +3962,9 @@ class _MapViewState extends State<MapView> {
                                   ),
                                   subtitle: Text(
                                     [
-                                      if (departure.displayDirection.isNotEmpty)
+                                        if (departure
+                                            .displayDirection
+                                            .isNotEmpty)
                                         departure.route,
                                       departure.isEstimated
                                           ? 'Live vehicle estimate'
@@ -4023,14 +4016,12 @@ class _MapViewState extends State<MapView> {
                 ),
               ),
             ),
+            ),
           );
         },
       ),
     );
-    modalFuture.whenComplete(() {
-      refreshTimer?.cancel();
-      if (mounted) setState(() => _isStopDetailsOpen = false);
-    });
+    modalFuture.whenComplete(() => refreshTimer?.cancel());
   }
 
   Future<List<StopDeparture>> _fetchNextDepartures(String stopId) async {
@@ -4594,12 +4585,6 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  bool get _areMapActionsBlocked =>
-      _currentItinerary != null ||
-      _isStopDetailsOpen ||
-      (_isSearchOpen &&
-          (_placeSearchResults.isNotEmpty || _selectedPlace != null));
-
   Widget _buildMapTopPanel() {
     final isCompact = MediaQuery.sizeOf(context).width < 400;
     final hasSearchContent =
@@ -4837,68 +4822,34 @@ class _MapViewState extends State<MapView> {
                 ? const Center(child: CircularProgressIndicator())
                 : Stack(
                     children: [
-                      AbsorbPointer(
-                        absorbing: _areMapActionsBlocked,
-                        child: MapLibreMap(
+                      MapLibreMap(
                           initialCameraPosition: const CameraPosition(
                             target: LatLng(3.1390, 101.6868),
                             zoom: 12,
                           ),
-                          // Native MapLibre only guarantees reporting updated
-                          // camera positions when this is enabled. Weather is
-                          // keyed to the visible map centre, not device GPS.
+                        // Weather is keyed to the visible map centre.
                           trackCameraPosition: true,
-                          // iOS MapLibre permits its native pan recognizer to
-                          // run simultaneously with Flutter's sheet drag, so
-                          // block map scrolling at the native map while the
-                          // itinerary is open.
-                          scrollGesturesEnabled: !_areMapActionsBlocked,
-                          zoomGesturesEnabled: !_areMapActionsBlocked,
-                          rotateGesturesEnabled: !_areMapActionsBlocked,
-                          tiltGesturesEnabled: !_areMapActionsBlocked,
-                          doubleClickZoomEnabled: !_areMapActionsBlocked,
+                        scrollGesturesEnabled: true,
+                        zoomGesturesEnabled: true,
+                        rotateGesturesEnabled: true,
+                        tiltGesturesEnabled: true,
+                        doubleClickZoomEnabled: true,
                           onMapCreated: _onMapCreated,
-                          onMapClick: _areMapActionsBlocked
-                              ? null
-                              : (point, coordinate) =>
+                        onMapClick: (point, coordinate) =>
                                     _handleMapStartPick(point, coordinate),
-                          // A transit feature tap is handled by the feature
-                          // listener; it must not also be treated as a plain
-                          // map tap (for example, when choosing a start point).
                           featureTapsTriggersMapClick: false,
-                          onMapLongClick: _areMapActionsBlocked
-                              ? null
-                              : (_, coordinate) =>
+                        onMapLongClick: (_, coordinate) =>
                                     _showLongPressedLocation(coordinate),
                           onCameraMove: _onCameraMove,
                           onCameraIdle: _onCameraIdle,
                           styleString: _dynamicStyleString!,
                           compassEnabled: false,
-                          // MapLibre's web implementation does not support
-                          // custom compass margins. Leave them unset on web;
-                          // native builds retain the layout above the buttons.
                           compassViewPosition: kIsWeb
                               ? CompassViewPosition.topRight
                               : CompassViewPosition.bottomRight,
                           compassViewMargins: kIsWeb
                               ? null
                               : const Point(16, 160),
-                        ),
-                      ),
-                      // UIKit's native map view can continue receiving pan
-                      // sequences underneath Flutter overlays. When a card
-                      // is open, claim map-area drag gestures in Flutter so
-                      // they never fall through to MapLibre. This layer sits
-                      // below the cards, so their own scrolling and controls
-                      // remain interactive.
-                      if (_areMapActionsBlocked)
-                        Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanStart: (_) {},
-                            onPanUpdate: (_) {},
-                            onPanEnd: (_) {},
-                          ),
                         ),
                       if (_currentItinerary == null)
                         Positioned(
@@ -4916,7 +4867,7 @@ class _MapViewState extends State<MapView> {
                             child: _buildMapTopPanel(),
                           ),
                         ),
-                      if (!_areMapActionsBlocked && _canReportIncident)
+                      if (_currentItinerary == null && _canReportIncident)
                         Positioned(
                           left: 16,
                           bottom: 16,
@@ -4927,17 +4878,6 @@ class _MapViewState extends State<MapView> {
                               icon: const Icon(Icons.report_problem_outlined),
                               label: const Text('Report'),
                             ),
-                          ),
-                        ),
-                      if (_currentItinerary != null)
-                        Positioned.fill(
-                          // Keep a hit-test target above the native map while
-                          // leaving drag recognition to the itinerary sheet.
-                          // A scale GestureDetector here competes with the
-                          // sheet's vertical drag on mobile platform views.
-                          child: Listener(
-                            behavior: HitTestBehavior.opaque,
-                            onPointerDown: (_) {},
                           ),
                         ),
                       if (_currentItinerary != null)
@@ -4966,6 +4906,14 @@ class _MapViewState extends State<MapView> {
                                   }
                                   return false;
                                 },
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  // Catch map drags that begin on the itinerary
+                                  // surface. The nested ListView keeps its own
+                                  // scroll/drag recognizers.
+                                  onPanStart: (_) {},
+                                  onPanUpdate: (_) {},
+                                  onPanEnd: (_) {},
                                 child: Container(
                                   decoration: BoxDecoration(
                                     color: Colors.white,
@@ -5030,7 +4978,8 @@ class _MapViewState extends State<MapView> {
                                                     ),
                                                   ),
                                                   IconButton(
-                                                    tooltip: 'Close itinerary',
+                                                      tooltip:
+                                                          'Close itinerary',
                                                     icon: const Icon(
                                                       Icons.close,
                                                     ),
@@ -5067,15 +5016,18 @@ class _MapViewState extends State<MapView> {
                                                   ),
                                                 ),
                                               ],
-                                              if (weatherReminder != null) ...[
+                                                if (weatherReminder !=
+                                                    null) ...[
                                                 const SizedBox(height: 8),
                                                 Container(
                                                   width: double.infinity,
-                                                  padding: const EdgeInsets.all(
+                                                    padding:
+                                                        const EdgeInsets.all(
                                                     10,
                                                   ),
                                                   decoration: BoxDecoration(
-                                                    color: Colors.blue.shade50,
+                                                      color:
+                                                          Colors.blue.shade50,
                                                     borderRadius:
                                                         BorderRadius.circular(
                                                           10,
@@ -5087,10 +5039,13 @@ class _MapViewState extends State<MapView> {
                                                             .start,
                                                     children: [
                                                       const Icon(
-                                                        Icons.umbrella_outlined,
+                                                          Icons
+                                                              .umbrella_outlined,
                                                         color: Colors.blue,
                                                       ),
-                                                      const SizedBox(width: 8),
+                                                        const SizedBox(
+                                                          width: 8,
+                                                        ),
                                                       Expanded(
                                                         child: Text(
                                                           weatherReminder,
@@ -5196,7 +5151,9 @@ class _MapViewState extends State<MapView> {
                                                 fontWeight: FontWeight.bold,
                                               ),
                                             ),
-                                            if (leg.incidentReports.isNotEmpty)
+                                              if (leg
+                                                  .incidentReports
+                                                  .isNotEmpty)
                                               const Icon(
                                                 Icons.warning_amber_rounded,
                                                 color: Colors.orange,
@@ -5266,7 +5223,8 @@ class _MapViewState extends State<MapView> {
                                                 8,
                                               ),
                                               child: Align(
-                                                alignment: Alignment.centerLeft,
+                                                  alignment:
+                                                      Alignment.centerLeft,
                                                 child: Text(
                                                   'No intermediate stops provided.',
                                                 ),
@@ -5282,7 +5240,9 @@ class _MapViewState extends State<MapView> {
                                                   dense: true,
                                                   leading: CircleAvatar(
                                                     radius: 14,
-                                                    child: Text('${index + 1}'),
+                                                      child: Text(
+                                                        '${index + 1}',
+                                                      ),
                                                   ),
                                                   title: Text(stop.name),
                                                 );
@@ -5302,6 +5262,7 @@ class _MapViewState extends State<MapView> {
                                     },
                                   ),
                                 ),
+                              ),
                               ),
                             );
                           },
@@ -5332,7 +5293,7 @@ class _MapViewState extends State<MapView> {
         ),
         // The itinerary sheet owns the lower map while it is open, so it is
         // never obstructed by the map action buttons.
-        floatingActionButton: _selectedTab == 0 && !_areMapActionsBlocked
+        floatingActionButton: _selectedTab == 0 && _currentItinerary == null
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
