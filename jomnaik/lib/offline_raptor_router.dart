@@ -11,7 +11,7 @@ import 'offline_bundle_store.dart';
 /// results accordingly.
 class OfflineRaptorRouter {
   static const _asset = 'assets/offline/raptor_klang_valley.json';
-  static const _maximumTransitWaitSeconds = 10 * 60;
+  static const _maximumTransitWaitSeconds = 45 * 60;
   Map<String, dynamic>? _data;
   List<_Trip>? _trips;
   final _store = OfflineBundleStore();
@@ -318,9 +318,6 @@ class OfflineRaptorRouter {
         final departure = trip.nextDeparture(index, label.arrival);
 
         // If the next departure is more than 45 minutes away, do not wait on the platform
-        final isWaitReasonable =
-            departure != null && (departure - label.arrival) <= 2700;
-
         if (departure != null &&
             departure - label.arrival <= _maximumTransitWaitSeconds &&
             (boarding == null || departure < boarding.departure)) {

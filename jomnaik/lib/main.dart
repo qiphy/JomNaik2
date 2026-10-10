@@ -226,6 +226,7 @@ class _MapViewState extends State<MapView> {
   final Map<String, _TimedCache<List<StopDeparture>>> _departureCache = {};
   final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
   bool _isSearchOpen = true;
+  bool _isStopDetailsOpen = false;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
   List<_TransitStation> _railStations = const [];
@@ -1262,7 +1263,7 @@ class _MapViewState extends State<MapView> {
       final key = signature.isEmpty
           ? category
           : category == 'hybrid'
-          ? 'hybrid|$signature'
+          ? 'hybrid|${itinerary['hybridFirstMile'] == true}|${itinerary['hybridLastMile'] == true}|$signature'
           : signature;
       final existing = unique[key];
       if (existing == null ||
@@ -1806,6 +1807,52 @@ class _MapViewState extends State<MapView> {
       }
 
       final itineraries = responseData['itineraries'] as List<dynamic>;
+      bool hasTransitItinerary(Iterable<dynamic> candidates) =>
+          candidates.any((itinerary) {
+            if (itinerary is! Map || itinerary['legs'] is! List) return false;
+            return (itinerary['legs'] as List).any((leg) {
+              if (leg is! Map) return false;
+              final mode = leg['mode']?.toString().toUpperCase();
+              return mode != null && mode != 'WALK' && mode != 'HAIL';
+            });
+          });
+
+      // A successful backend response can still contain only a direct
+      // e-hailing option. Before presenting that as the only usable route,
+      // query the bundled timetable and convert long access/egress walks into
+      // optional e-hailing connections around transit.
+      if (!hasTransitItinerary(itineraries)) {
+        try {
+          final offlineTransit = await _offlineRaptorRouter.plan(
+            fromLat: fromLat,
+            fromLon: fromLon,
+            toLat: toLat,
+            toLon: toLon,
+            fromStopId: fromStopId,
+            toStopId: toStopId,
+            walkingPreference: _walkingPreference,
+          );
+          final offlineItineraries = offlineTransit?['itineraries'];
+          if (offlineItineraries is List &&
+              hasTransitItinerary(offlineItineraries)) {
+            final combined = {
+              ...responseData,
+              'itineraries': [...offlineItineraries, ...itineraries],
+              'offlineRouting': true,
+            };
+            return _addDirectModeAlternatives(
+              combined,
+              fromLat: fromLat,
+              fromLon: fromLon,
+              toLat: toLat,
+              toLon: toLon,
+            );
+          }
+        } catch (error) {
+          debugPrint('Offline transit supplement failed: $error');
+        }
+      }
+
       if (itineraries.isEmpty) {
         final alternatives = _addDirectModeAlternatives(
           responseData,
@@ -2143,8 +2190,17 @@ class _MapViewState extends State<MapView> {
         ),
       );
     }
-    itineraries.addAll(_firstMileEhailingAlternatives(itineraries));
-    itineraries.addAll(_lastMileEhailingAlternatives(itineraries));
+    final firstMileAlternatives = _firstMileEhailingAlternatives(itineraries);
+    itineraries.addAll(firstMileAlternatives);
+    // Build final-mile variants from both the original transit routes and
+    // first-mile variants, so a single itinerary can use transit for its main
+    // journey with e-hailing at both ends when needed.
+    itineraries.addAll(
+      _lastMileEhailingAlternatives([
+        ...List<dynamic>.from(existing),
+        ...firstMileAlternatives,
+      ]),
+    );
     final walking = _offlineWalkingItinerary(
       fromLat: fromLat,
       fromLon: fromLon,
@@ -2226,6 +2282,13 @@ class _MapViewState extends State<MapView> {
           (itinerary['walkingSeconds'] as num?)?.toInt() ?? 0;
       final duration = (itinerary['duration'] as num?)?.toInt() ?? 0;
       final updatedDuration = _durationFromLegs(legs, duration);
+      final previousFareMin =
+          (itinerary['fareMin'] as num?)?.toDouble() ??
+          (itinerary['fareAmount'] as num?)?.toDouble() ??
+          0;
+      final previousFareMax =
+          (itinerary['fareMax'] as num?)?.toDouble() ?? previousFareMin;
+      final hailFarePerKm = distanceMeters / 1000;
       alternatives.add({
         ...itinerary,
         'duration': updatedDuration,
@@ -2233,8 +2296,8 @@ class _MapViewState extends State<MapView> {
           0,
           walkingSeconds - walkEnd.difference(walkStart).inSeconds,
         ),
-        'fareMin': distanceMeters / 1000,
-        'fareMax': distanceMeters / 1000 * 3,
+        'fareMin': previousFareMin + hailFarePerKm,
+        'fareMax': previousFareMax + hailFarePerKm * 3,
         'fareLabel': 'Estimated first-mile e-hailing fare',
         'routeCategory': 'hybrid',
         'hybridFirstMile': true,
@@ -2304,6 +2367,14 @@ class _MapViewState extends State<MapView> {
       final originalDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
       final originalWalkSeconds =
           (itinerary['walkingSeconds'] as num?)?.toInt() ?? 0;
+      final previousFareMin =
+          (itinerary['fareMin'] as num?)?.toDouble() ??
+          (itinerary['fareAmount'] as num?)?.toDouble() ??
+          0;
+      final previousFareMax =
+          (itinerary['fareMax'] as num?)?.toDouble() ?? previousFareMin;
+      final hailFarePerKm = distanceMeters / 1000;
+      final includesFirstMile = itinerary['hybridFirstMile'] == true;
       final originalEnd = DateTime.tryParse(last['endTime']?.toString() ?? '');
       final replacedSeconds = originalEnd == null
           ? 0
@@ -2313,17 +2384,17 @@ class _MapViewState extends State<MapView> {
         ...itinerary,
         'duration': updatedDuration,
         'walkingSeconds': math.max(0, originalWalkSeconds - replacedSeconds),
-        'fareMin':
-            (itinerary['fareMin'] as num?)?.toDouble() ?? distanceMeters / 1000,
-        'fareMax':
-            (itinerary['fareMax'] as num?)?.toDouble() ??
-            distanceMeters / 1000 * 3,
-        'fareLabel': 'Estimated connecting e-hailing fare',
+        'fareMin': previousFareMin + hailFarePerKm,
+        'fareMax': previousFareMax + hailFarePerKm * 3,
+        'fareLabel': includesFirstMile
+            ? 'Estimated first and last-mile e-hailing fare'
+            : 'Estimated connecting e-hailing fare',
         'routeCategory': 'hybrid',
         'hybridLastMile': true,
-        'optionMessage':
-            'Public transport with e-hailing for the final mile because '
-            'the destination is more than 1 km from the last stop.',
+        'optionMessage': includesFirstMile
+            ? 'E-hailing to the nearest stop and from the last stop, with public transport for the main journey.'
+            : 'Public transport with e-hailing for the final mile because '
+                  'the destination is more than 1 km from the last stop.',
         'legs': legs,
       });
     }
@@ -3669,6 +3740,7 @@ class _MapViewState extends State<MapView> {
     required String transitType,
     _TransitStop? stop,
   }) {
+    if (mounted) setState(() => _isStopDetailsOpen = true);
     Future<List<StopDeparture>> departureFuture = _fetchNextDepartures(stopId);
     Future<_TrafficCongestion?> congestionFuture = stop == null
         ? Future.value(null)
@@ -3955,7 +4027,10 @@ class _MapViewState extends State<MapView> {
         },
       ),
     );
-    modalFuture.whenComplete(() => refreshTimer?.cancel());
+    modalFuture.whenComplete(() {
+      refreshTimer?.cancel();
+      if (mounted) setState(() => _isStopDetailsOpen = false);
+    });
   }
 
   Future<List<StopDeparture>> _fetchNextDepartures(String stopId) async {
@@ -4521,6 +4596,7 @@ class _MapViewState extends State<MapView> {
 
   bool get _areMapActionsBlocked =>
       _currentItinerary != null ||
+      _isStopDetailsOpen ||
       (_isSearchOpen &&
           (_placeSearchResults.isNotEmpty || _selectedPlace != null));
 
