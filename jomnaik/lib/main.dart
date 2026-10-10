@@ -164,6 +164,8 @@ class MapView extends StatefulWidget {
 }
 
 class _MapViewState extends State<MapView> {
+  static const double _itineraryInitialExtent = 0.45;
+
   static const _currentRegion = 'Klang Valley';
   // Bounds read from assets/tiles/klang_valley.pmtiles. Keep route requests
   // within the offline map coverage rather than showing a blank map area.
@@ -908,6 +910,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _handleMapStartPick(dynamic point, LatLng coordinate) async {
+    if (_areMapActionsBlocked) return;
     final picker = _mapStartPicker;
     if (picker == null || picker.isCompleted) return;
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
@@ -3047,6 +3050,7 @@ class _MapViewState extends State<MapView> {
       layerId,
       annotation,
     ) {
+      if (_areMapActionsBlocked) return;
       _queryTappedFeature(point);
     });
   }
@@ -4508,6 +4512,11 @@ class _MapViewState extends State<MapView> {
     );
   }
 
+  bool get _areMapActionsBlocked =>
+      _currentItinerary != null ||
+      (_isSearchOpen &&
+          (_placeSearchResults.isNotEmpty || _selectedPlace != null));
+
   Widget _buildMapTopPanel() {
     final isCompact = MediaQuery.sizeOf(context).width < 400;
     final hasSearchContent =
@@ -4651,6 +4660,7 @@ class _MapViewState extends State<MapView> {
     }
     final isMapTab = _selectedTab == 0;
     final itineraryIsOpen = _selectedTab == 0 && _currentItinerary != null;
+    final viewportWidth = MediaQuery.sizeOf(context).width;
     return PopScope(
       canPop: !itineraryIsOpen,
       onPopInvokedWithResult: (didPop, _) {
@@ -4663,7 +4673,13 @@ class _MapViewState extends State<MapView> {
         appBar: AppBar(
           automaticallyImplyLeading: false,
           toolbarHeight: isMapTab ? 64 : null,
-          leadingWidth: isMapTab ? 148 : null,
+          leadingWidth: isMapTab
+              ? viewportWidth < 360
+                    ? 128
+                    : viewportWidth < 400
+                    ? 136
+                    : 148
+              : null,
           leading: isMapTab
               ? Padding(
                   padding: const EdgeInsets.only(left: 12, top: 10, bottom: 10),
@@ -4739,7 +4755,7 @@ class _MapViewState extends State<MapView> {
                 : Stack(
                     children: [
                       AbsorbPointer(
-                        absorbing: _currentItinerary != null,
+                        absorbing: _areMapActionsBlocked,
                         child: MapLibreMap(
                           initialCameraPosition: const CameraPosition(
                             target: LatLng(3.1390, 101.6868),
@@ -4753,20 +4769,24 @@ class _MapViewState extends State<MapView> {
                           // run simultaneously with Flutter's sheet drag, so
                           // block map scrolling at the native map while the
                           // itinerary is open.
-                          scrollGesturesEnabled: _currentItinerary == null,
-                          zoomGesturesEnabled: _currentItinerary == null,
-                          rotateGesturesEnabled: _currentItinerary == null,
-                          tiltGesturesEnabled: _currentItinerary == null,
-                          doubleClickZoomEnabled: _currentItinerary == null,
+                          scrollGesturesEnabled: !_areMapActionsBlocked,
+                          zoomGesturesEnabled: !_areMapActionsBlocked,
+                          rotateGesturesEnabled: !_areMapActionsBlocked,
+                          tiltGesturesEnabled: !_areMapActionsBlocked,
+                          doubleClickZoomEnabled: !_areMapActionsBlocked,
                           onMapCreated: _onMapCreated,
-                          onMapClick: (point, coordinate) =>
-                              _handleMapStartPick(point, coordinate),
+                          onMapClick: _areMapActionsBlocked
+                              ? null
+                              : (point, coordinate) =>
+                                    _handleMapStartPick(point, coordinate),
                           // A transit feature tap is handled by the feature
                           // listener; it must not also be treated as a plain
                           // map tap (for example, when choosing a start point).
                           featureTapsTriggersMapClick: false,
-                          onMapLongClick: (_, coordinate) =>
-                              _showLongPressedLocation(coordinate),
+                          onMapLongClick: _areMapActionsBlocked
+                              ? null
+                              : (_, coordinate) =>
+                                    _showLongPressedLocation(coordinate),
                           onCameraMove: _onCameraMove,
                           onCameraIdle: _onCameraIdle,
                           styleString: _dynamicStyleString!,
@@ -4798,7 +4818,7 @@ class _MapViewState extends State<MapView> {
                             child: _buildMapTopPanel(),
                           ),
                         ),
-                      if (_currentItinerary == null && _canReportIncident)
+                      if (!_areMapActionsBlocked && _canReportIncident)
                         Positioned(
                           left: 16,
                           bottom: 16,
@@ -4824,7 +4844,7 @@ class _MapViewState extends State<MapView> {
                         ),
                       if (_currentItinerary != null)
                         DraggableScrollableSheet(
-                          initialChildSize: 0.45,
+                          initialChildSize: _itineraryInitialExtent,
                           minChildSize: 0.25,
                           maxChildSize: 1,
                           builder: (BuildContext context, ScrollController scrollController) {
@@ -4832,7 +4852,9 @@ class _MapViewState extends State<MapView> {
                               DraggableScrollableNotification
                             >(
                               onNotification: (notification) {
-                                if ((notification.extent - 0.25).abs() >
+                                if ((notification.extent -
+                                            _itineraryInitialExtent)
+                                        .abs() >
                                     0.005) {
                                   _markItineraryUserInteracted();
                                 }
@@ -5212,7 +5234,7 @@ class _MapViewState extends State<MapView> {
         ),
         // The itinerary sheet owns the lower map while it is open, so it is
         // never obstructed by the map action buttons.
-        floatingActionButton: _selectedTab == 0 && _currentItinerary == null
+        floatingActionButton: _selectedTab == 0 && !_areMapActionsBlocked
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
