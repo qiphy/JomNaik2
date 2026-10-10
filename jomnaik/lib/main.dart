@@ -4657,7 +4657,9 @@ class _MapViewState extends State<MapView> {
         if (!didPop && itineraryIsOpen) _dismissItinerary();
       },
       child: Scaffold(
-        extendBodyBehindAppBar: isMapTab,
+        // Keep the itinerary viewport below the search bar so its top rows
+        // remain visible and scrollable on small screens.
+        extendBodyBehindAppBar: isMapTab && !itineraryIsOpen,
         appBar: AppBar(
           automaticallyImplyLeading: false,
           toolbarHeight: isMapTab ? 64 : null,
@@ -4822,8 +4824,8 @@ class _MapViewState extends State<MapView> {
                         ),
                       if (_currentItinerary != null)
                         DraggableScrollableSheet(
-                          initialChildSize: 0.25,
-                          minChildSize: 0.15,
+                          initialChildSize: 0.45,
+                          minChildSize: 0.25,
                           maxChildSize: 1,
                           builder: (BuildContext context, ScrollController scrollController) {
                             return NotificationListener<
