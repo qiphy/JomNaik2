@@ -4363,7 +4363,14 @@ class _MapViewState extends State<MapView> {
           ? 'https://apps.apple.com/my/search?term=e-hailing'
           : 'https://play.google.com/store/search?q=e-hailing%20Malaysia&c=apps',
     );
-    if (!await launchUrl(storeUri, mode: LaunchMode.externalApplication)) {
+    if (!await launchUrl(
+      storeUri,
+      mode: LaunchMode.externalApplication,
+      // In a browser, navigate this tab directly. Opening a new window via
+      // window.open can be blocked after the async platform call and leave an
+      // about:blank tab behind.
+      webOnlyWindowName: kIsWeb ? '_self' : null,
+    )) {
       _showMessage('Could not open the ${isIos ? 'App Store' : 'Play Store'}.');
     }
   }
