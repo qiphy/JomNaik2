@@ -221,7 +221,6 @@ class _MapViewState extends State<MapView> {
   DateTime? _lastLocationWorkAt;
   bool _routeRequestInFlight = false;
   final Map<String, _TimedCache<List<StopDeparture>>> _departureCache = {};
-  final Map<String, _TimedCache<List<StationIncident>>> _incidentCache = {};
   final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
   bool _isSearchOpen = true;
   Completer<PlaceSearchResult?>? _mapStartPicker;
@@ -231,7 +230,44 @@ class _MapViewState extends State<MapView> {
   _TransitStation? _nearestStation;
   int _selectedTab = 0;
 
-  bool get _canReportIncident => _isSupabaseConfigured;
+  bool get _canReportIncident =>
+      _isSupabaseConfigured &&
+      Supabase.instance.client.auth.currentUser != null;
+
+  String get _walkingPreference {
+    if (!_isSupabaseConfigured) return 'standard';
+    final preference = Supabase
+        .instance
+        .client
+        .auth
+        .currentUser
+        ?.userMetadata?['accessibility_mode']
+        ?.toString();
+    return const {'standard', 'avoid_stairs', 'step_free'}.contains(preference)
+        ? preference!
+        : 'standard';
+  }
+
+  double get _walkingSpeedMetersPerSecond => switch (_walkingPreference) {
+    'avoid_stairs' => 1.0,
+    'step_free' => 0.8,
+    _ => 1.35,
+  };
+
+  double _routePreferenceScore(Map<String, dynamic> itinerary) {
+    final duration =
+        (itinerary['duration'] as num?)?.toDouble() ?? double.infinity;
+    if (_walkingPreference == 'standard') return duration;
+
+    final walkingSeconds =
+        (itinerary['walkingSeconds'] as num?)?.toDouble() ?? 0;
+    final transfers = (itinerary['transferCount'] as num?)?.toDouble() ?? 0;
+    final walkingWeight = _walkingPreference == 'step_free' ? 2.0 : 1.5;
+    final transferPenalty = _walkingPreference == 'step_free' ? 480 : 240;
+    return duration +
+        walkingSeconds * (walkingWeight - 1) +
+        transfers * transferPenalty;
+  }
 
   @override
   void initState() {
@@ -1172,6 +1208,12 @@ class _MapViewState extends State<MapView> {
     // starts later, while keeping short walking and direct e-hailing options
     // ahead of a timetable that departs much later.
     itineraries.sort((left, right) {
+      if (_walkingPreference != 'standard') {
+        final preferenceComparison = _routePreferenceScore(
+          left,
+        ).compareTo(_routePreferenceScore(right));
+        if (preferenceComparison != 0) return preferenceComparison;
+      }
       final walkingComparison =
           ((left['walkingSeconds'] as num?)?.toInt() ?? 1 << 30).compareTo(
             (right['walkingSeconds'] as num?)?.toInt() ?? 1 << 30,
@@ -1190,6 +1232,12 @@ class _MapViewState extends State<MapView> {
       final leftIsFullHail = left['routeCategory']?.toString() == 'ehailing';
       final rightIsFullHail = right['routeCategory']?.toString() == 'ehailing';
       if (leftIsFullHail != rightIsFullHail) return leftIsFullHail ? -1 : 1;
+      final leftDuration =
+          (left['duration'] as num?)?.toDouble() ?? double.infinity;
+      final rightDuration =
+          (right['duration'] as num?)?.toDouble() ?? double.infinity;
+      return leftDuration.compareTo(rightDuration);
+    });
 
     DateTime departure(Map<String, dynamic> itinerary) {
       final legs = _itineraryLegs(itinerary);
@@ -1220,14 +1268,13 @@ class _MapViewState extends State<MapView> {
     }
     final deduplicated = unique.values.toList();
 
-    // Rank by total time taken first, then number of transfers. Distance and
-    // mode are only tie-breakers after the requested priorities.
+    // Accessibility preferences apply a walking and transfer cost before
+    // incident risk and the usual duration tie-breakers.
     deduplicated.sort((left, right) {
-      final durationComparison =
-          ((left['duration'] as num?)?.toDouble() ?? double.infinity).compareTo(
-            (right['duration'] as num?)?.toDouble() ?? double.infinity,
-          );
-      if (durationComparison != 0) return durationComparison;
+      final preferenceComparison = _routePreferenceScore(
+        left,
+      ).compareTo(_routePreferenceScore(right));
+      if (preferenceComparison != 0) return preferenceComparison;
       final riskComparison =
           ((left['incidentRiskScore'] as num?)?.toDouble() ?? 0).compareTo(
             (right['incidentRiskScore'] as num?)?.toDouble() ?? 0,
@@ -1696,6 +1743,7 @@ class _MapViewState extends State<MapView> {
         'to_lat': toLat,
         'to_lon': toLon,
         'prefer_brt': preferBrt,
+        'walking_preference': _walkingPreference,
         'departure_date':
             '${departure.year.toString().padLeft(4, '0')}-${departure.month.toString().padLeft(2, '0')}-${departure.day.toString().padLeft(2, '0')}',
         'departure_time':
@@ -1827,6 +1875,7 @@ class _MapViewState extends State<MapView> {
         toLon: toLon,
         fromStopId: fromStopId,
         toStopId: toStopId,
+        walkingPreference: _walkingPreference,
       );
       if (result != null) {
         _showMessage(
@@ -1870,9 +1919,17 @@ class _MapViewState extends State<MapView> {
       if (response.statusCode != 200) return routeData;
       final decoded = jsonDecode(response.body);
       if (decoded is! Map || decoded['incidents'] is! List) return routeData;
-      final incidents = (decoded['incidents'] as List)
-          .whereType<Map>()
-          .toList();
+      final now = DateTime.now().toUtc();
+      final incidents = (decoded['incidents'] as List).whereType<Map>().where((
+        incident,
+      ) {
+        final reportedAt = DateTime.tryParse(
+          incident['reported_at']?.toString() ?? '',
+        );
+        if (reportedAt == null) return false;
+        return now.difference(reportedAt.toUtc()) <=
+            const Duration(minutes: 15);
+      }).toList();
       final itineraries = routeData['itineraries'];
       if (itineraries is! List) return routeData;
       return {
@@ -2263,7 +2320,10 @@ class _MapViewState extends State<MapView> {
     // Pyramid to Taylor's. The map renderer replaces this estimate with the
     // pedestrian-network geometry when the itinerary is selected.
     if (distanceMeters > 5000) return null;
-    final walkingSeconds = math.max(60, (distanceMeters / 1.35).round());
+    final walkingSeconds = math.max(
+      60,
+      (distanceMeters / _walkingSpeedMetersPerSecond).round(),
+    );
     final start = DateTime.now();
     final end = start.add(Duration(seconds: walkingSeconds));
     return {
@@ -3547,7 +3607,7 @@ class _MapViewState extends State<MapView> {
     Future<_TrafficCongestion?> congestionFuture = stop == null
         ? Future.value(null)
         : _fetchTrafficCongestion(stopId, stop.lat, stop.lon);
-    final incidents = _fetchStopIncidents(stopId);
+    var incidents = _fetchStopIncidents(stopId, stop);
     Timer? refreshTimer;
     var refreshScheduled = false;
     final modalFuture = showModalBottomSheet<void>(
@@ -3571,6 +3631,7 @@ class _MapViewState extends State<MapView> {
                     stop.lon,
                   );
                 }
+                incidents = _fetchStopIncidents(stopId, stop);
               });
             });
           }
@@ -3619,44 +3680,68 @@ class _MapViewState extends State<MapView> {
                         future: incidents,
                         builder: (context, snapshot) {
                           final currentIncidents = snapshot.data ?? const [];
-                          if (currentIncidents.isEmpty) {
-                            return const SizedBox.shrink();
-                          }
+                          final reportCount = currentIncidents.fold<int>(
+                            0,
+                            (total, incident) => total + incident.count,
+                          );
+                          final reportLevel = snapshot.hasError
+                              ? 'Unavailable'
+                              : snapshot.connectionState != ConnectionState.done
+                              ? 'Loading'
+                              : _incidentStatusLabel(reportCount);
+                          final reportColor = snapshot.hasError
+                              ? Colors.blueGrey
+                              : reportCount >= 3
+                              ? Colors.red
+                              : reportCount == 2
+                              ? Colors.orange
+                              : Colors.green;
+                          final reportMessage = snapshot.hasError
+                              ? 'Incident report level unavailable.'
+                              : snapshot.connectionState != ConnectionState.done
+                              ? 'Loading recent reports…'
+                              : reportCount == 0
+                              ? 'No reports in the last 15 minutes.'
+                              : '$reportCount recent report${reportCount == 1 ? '' : 's'}';
                           return Container(
                             width: double.infinity,
                             margin: const EdgeInsets.only(bottom: 20),
                             padding: const EdgeInsets.all(12),
                             decoration: BoxDecoration(
-                              color: Colors.orange.shade50,
+                              color: reportColor.shade50,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Row(
+                                Row(
                                   children: [
                                     Icon(
                                       Icons.warning_amber_rounded,
-                                      color: Colors.orange,
+                                      color: reportColor,
                                     ),
-                                    SizedBox(width: 8),
+                                    const SizedBox(width: 8),
                                     Text(
-                                      'Recent reports',
+                                      'Incident report level: $reportLevel',
                                       style: TextStyle(
                                         fontWeight: FontWeight.w700,
                                       ),
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 8),
-                                ...currentIncidents.map(
-                                  (incident) => Padding(
-                                    padding: const EdgeInsets.only(bottom: 4),
-                                    child: Text(
-                                      '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
+                                const SizedBox(height: 4),
+                                Text(reportMessage),
+                                if (currentIncidents.isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  ...currentIncidents.map(
+                                    (incident) => Padding(
+                                      padding: const EdgeInsets.only(bottom: 4),
+                                      child: Text(
+                                        '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
+                                      ),
                                     ),
                                   ),
-                                ),
+                                ],
                               ],
                             ),
                           );
@@ -3841,18 +3926,65 @@ class _MapViewState extends State<MapView> {
     return departures;
   }
 
-  Future<List<StationIncident>> _fetchStopIncidents(String stopId) async {
-    final cached = _incidentCache[stopId];
-    if (cached != null &&
-        DateTime.now().difference(cached.loadedAt) <
-            const Duration(seconds: 30)) {
-      return cached.value;
+  Future<List<StationIncident>> _fetchStopIncidents(
+    String stopId,
+    _TransitStop? stop,
+  ) async {
+    final response = await _httpClient
+        .get(
+          Uri.parse('$_backendBaseUrl/api/incidents/recent'),
+          headers: await backendHeaders(),
+        )
+        .timeout(const Duration(seconds: 8));
+    if (response.statusCode != 200) {
+      throw StateError('Could not load incident reports.');
     }
-    // Incident reports are stored directly in Supabase by this app; the GTFS
-    // service intentionally has no incidents endpoint.
-    const incidents = <StationIncident>[];
-    _incidentCache[stopId] = _TimedCache(incidents);
-    return incidents;
+
+    final data = jsonDecode(response.body);
+    if (data is! Map || data['incidents'] is! List) {
+      throw const FormatException('Invalid incident report response.');
+    }
+
+    final now = DateTime.now().toUtc();
+    final grouped = <String, StationIncident>{};
+    for (final raw in data['incidents'] as List) {
+      if (raw is! Map) continue;
+      final reportedAt = DateTime.tryParse(
+        raw['reported_at']?.toString() ?? '',
+      );
+      if (reportedAt == null ||
+          now.difference(reportedAt.toUtc()) > const Duration(minutes: 15)) {
+        continue;
+      }
+
+      final reportStopId = raw['station_id']?.toString();
+      final matchesStopId = reportStopId == stopId;
+      final reportLat = (raw['station_lat'] as num?)?.toDouble();
+      final reportLon = (raw['station_lon'] as num?)?.toDouble();
+      final nearStop =
+          stop != null &&
+          reportLat != null &&
+          reportLon != null &&
+          Geolocator.distanceBetween(
+                stop.lat,
+                stop.lon,
+                reportLat,
+                reportLon,
+              ) <=
+              180;
+      if (!matchesStopId && !nearStop) continue;
+
+      final type = raw['report_type']?.toString() ?? 'disruption';
+      final route = raw['service_route']?.toString();
+      final key = '${type.toLowerCase()}|${route?.toLowerCase() ?? ''}';
+      final previous = grouped[key];
+      grouped[key] = StationIncident(
+        type: type,
+        route: route,
+        count: (previous?.count ?? 0) + 1,
+      );
+    }
+    return grouped.values.toList();
   }
 
   Future<_TrafficCongestion?> _fetchTrafficCongestion(
@@ -4246,33 +4378,169 @@ class _MapViewState extends State<MapView> {
         : '${(distance / 1000).toStringAsFixed(1)} km away';
     final crowdFuture = station == null ? null : _fetchStationCrowd(station.id);
 
-    return Card(
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Material(
+      color: colorScheme.surfaceContainerLow,
+      child: InkWell(
+        onTap: station == null ? null : _focusNearestStation,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: colorScheme.secondaryContainer,
+                foregroundColor: colorScheme.onSecondaryContainer,
+                child: const Icon(Icons.train),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Nearest station',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    station == null
+                        ? Text(distanceLabel)
+                        : FutureBuilder<_StationCrowd>(
+                            future: crowdFuture,
+                            builder: (context, snapshot) {
+                              final crowd = snapshot.data;
+                              return Text(
+                                '${station.name} • ${crowd?.label ?? 'Low crowd level'}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              );
+                            },
+                          ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (station == null)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                TextButton(
+                  onPressed: _focusNearestStation,
+                  child: Text(distanceLabel),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMapTopPanel() {
+    final hasSearchContent =
+        _isSearchOpen &&
+        (_placeSearchResults.isNotEmpty || _selectedPlace != null);
+
+    return Material(
+      color: Colors.white,
       elevation: 4,
-      child: ListTile(
-        leading: const CircleAvatar(child: Icon(Icons.train)),
-        title: const Text('Nearest station'),
-        subtitle: station == null
-            ? Text(distanceLabel)
-            : FutureBuilder<_StationCrowd>(
-                future: crowdFuture,
-                builder: (context, snapshot) {
-                  final crowd = snapshot.data;
-                  return Text(
-                    '${station.name} • ${crowd?.label ?? 'Crowd level unavailable'}',
+      borderRadius: BorderRadius.circular(16),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hasSearchContent && _placeSearchResults.isNotEmpty)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 280),
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: _placeSearchResults.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final place = _placeSearchResults[index];
+                  return ListTile(
+                    title: Text(place.name),
+                    subtitle: Text(
+                      place.address,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => _selectPlace(place),
                   );
                 },
               ),
-        trailing: station == null
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : TextButton(
-                onPressed: _focusNearestStation,
-                child: Text(distanceLabel),
+            ),
+          if (hasSearchContent && _selectedPlace != null) ...[
+            Container(
+              width: double.infinity,
+              margin: EdgeInsets.zero,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerLow,
               ),
-        onTap: station == null ? null : _focusNearestStation,
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Theme.of(
+                      context,
+                    ).colorScheme.primaryContainer,
+                    foregroundColor: Theme.of(
+                      context,
+                    ).colorScheme.onPrimaryContainer,
+                    child: const Icon(Icons.place),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _selectedPlace!.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        Text(
+                          _selectedPlace!.address,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonalIcon(
+                    onPressed: _getDirectionsToSelectedPlace,
+                    icon: const Icon(Icons.directions, size: 18),
+                    label: const Text('Go'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (_placeSearchResults.isNotEmpty) ...[
+            const Divider(height: 1),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Search results © OpenStreetMap contributors',
+                  style: TextStyle(fontSize: 11),
+                ),
+              ),
+            ),
+          ],
+          if (_currentItinerary == null) ...[
+            if (hasSearchContent) const Divider(height: 1),
+            _buildNearestStationCard(),
+          ],
+        ],
       ),
     );
   }
@@ -4350,7 +4618,6 @@ class _MapViewState extends State<MapView> {
           title: isMapTab
               ? Padding(
                   padding: const EdgeInsets.only(
-                    right: 12,
                     top: 10,
                     bottom: 10,
                   ),
@@ -4428,128 +4695,8 @@ class _MapViewState extends State<MapView> {
                             onPanStart: (_) {},
                             onPanUpdate: (_) {},
                             onPanEnd: (_) {},
-                            child: _buildNearestStationCard(),
+                            child: _buildMapTopPanel(),
                           ),
-                        ),
-                      if (_isSearchOpen &&
-                          (_placeSearchResults.isNotEmpty ||
-                              _selectedPlace != null))
-                        Positioned(
-                          top: 12,
-                          left: 16,
-                          right: 16,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanStart: (_) {},
-                            onPanUpdate: (_) {},
-                            onPanEnd: (_) {},
-                            child: SafeArea(
-                              child: Material(
-                                elevation: 4,
-                                borderRadius: BorderRadius.circular(12),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    if (_placeSearchResults.isNotEmpty)
-                                      ConstrainedBox(
-                                        constraints: const BoxConstraints(
-                                          maxHeight: 280,
-                                        ),
-                                        child: ListView.separated(
-                                          shrinkWrap: true,
-                                          itemCount: _placeSearchResults.length,
-                                          separatorBuilder: (_, _) =>
-                                              const Divider(height: 1),
-                                          itemBuilder: (context, index) {
-                                            final place =
-                                                _placeSearchResults[index];
-                                            return ListTile(
-                                              title: Text(place.name),
-                                              subtitle: Text(
-                                                place.address,
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              onTap: () => _selectPlace(place),
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    if (_selectedPlace != null) ...[
-                                      const Divider(height: 1),
-                                      Padding(
-                                        padding: const EdgeInsets.fromLTRB(
-                                          16,
-                                          12,
-                                          8,
-                                          12,
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    _selectedPlace!.name,
-                                                    style: const TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.w700,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(height: 2),
-                                                  Text(
-                                                    _selectedPlace!.address,
-                                                    maxLines: 2,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            FilledButton.icon(
-                                              onPressed:
-                                                  _getDirectionsToSelectedPlace,
-                                              icon: const Icon(
-                                                Icons.directions,
-                                              ),
-                                              label: const Text('Directions'),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                    if (_placeSearchResults.isNotEmpty ||
-                                        _selectedPlace != null)
-                                      const Padding(
-                                        padding: EdgeInsets.fromLTRB(
-                                          16,
-                                          0,
-                                          16,
-                                          8,
-                                        ),
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Text(
-                                            'Search results © OpenStreetMap contributors',
-                                            style: TextStyle(fontSize: 11),
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      if (_currentItinerary == null)
-                        Positioned(
-                          top: 66,
-                          left: 16,
-                          right: 16,
-                          child: _buildNearestStationCard(),
                         ),
                       if (_currentItinerary == null && _canReportIncident)
                         Positioned(
@@ -4716,6 +4863,12 @@ class _MapViewState extends State<MapView> {
                                     final walkwayLabel = leg.isSheltered
                                         ? 'Covered walkway'
                                         : 'Open walkway';
+                                    final walkPrefix =
+                                        leg.isNearestStationAccess
+                                        ? 'Walk via nearest pedestrian road to:'
+                                        : leg.isTransferWalk
+                                        ? 'Transfer via pedestrian route to'
+                                        : 'Walk to';
                                     return ListTile(
                                       leading: Icon(
                                         Icons.umbrella_outlined,
@@ -4724,11 +4877,7 @@ class _MapViewState extends State<MapView> {
                                             : Colors.grey,
                                       ),
                                       title: Text(
-                                        '${leg.isNearestStationAccess
-                                            ? 'Walk via nearest pedestrian road to:'
-                                            : leg.isTransferWalk
-                                            ? 'Transfer via pedestrian route to'
-                                            : 'Walk to'} ${leg.toPlace?.name ?? 'the next stop'}',
+                                        '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
                                       ),
                                       subtitle: Text(
                                         '$walkwayLabel • ${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)}',
@@ -4951,7 +5100,6 @@ class _MapViewState extends State<MapView> {
     );
   }
 }
-
 
 class _ProfilePage extends StatefulWidget {
   const _ProfilePage({required this.onStationLocationTrackingChanged});
@@ -5301,7 +5449,7 @@ class _SignedInProfileState extends State<_SignedInProfile> {
               decoration: const InputDecoration(
                 labelText: 'Walking accessibility preference',
                 helperText:
-                    'Demo estimate based on available map tags; verify paths locally.',
+                    'Changes route ranking and walking-time estimates. Stair-free access is not verified.',
                 border: OutlineInputBorder(),
               ),
               items: const [
@@ -5928,7 +6076,7 @@ class _StationCrowd {
     'high' => 'High crowd level',
     'medium' => 'Medium crowd level',
     'low' => 'Low crowd level',
-    _ => 'Crowd level unavailable',
+    _ => 'Low crowd level',
   };
 }
 

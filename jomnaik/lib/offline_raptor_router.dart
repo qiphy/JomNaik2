@@ -13,7 +13,6 @@ class OfflineRaptorRouter {
   static const _asset = 'assets/offline/raptor_klang_valley.json';
   static const _maximumTransitWaitSeconds = 10 * 60;
   Map<String, dynamic>? _data;
-  Map<String, String>? _railShapes; // Added to hold the encoded track curves
   List<_Trip>? _trips;
   final _store = OfflineBundleStore();
 
@@ -62,10 +61,9 @@ class OfflineRaptorRouter {
     DateTime? departure,
     String? fromStopId,
     String? toStopId,
+    String walkingPreference = 'standard',
   }) async {
     final data = await _load();
-    final shapes = await _loadShapes(); // Load geometry shapes
-
     final trips = _trips ??= (data['trips'] as List)
         .whereType<List>()
         .map(_Trip.fromRaw)
@@ -74,6 +72,13 @@ class OfflineRaptorRouter {
     final when = departure ?? DateTime.now();
     final dayStart = DateTime(when.year, when.month, when.day);
     final startSeconds = when.difference(dayStart).inSeconds;
+    // The bundled timetable has no verified pedestrian accessibility tags.
+    // Slower estimates make constrained preferences favor less walking.
+    final walkingSpeed = switch (walkingPreference) {
+      'avoid_stairs' => 1.0,
+      'step_free' => 0.8,
+      _ => 1.25,
+    };
     // Include stops beyond walking distance so the client can replace a long
     // access walk with an e-hailing first mile.
     final origin = _nearby(
@@ -82,6 +87,7 @@ class OfflineRaptorRouter {
       fromLon,
       preferred: fromStopId,
       maxDistanceMeters: 3000,
+      walkingSpeed: walkingSpeed,
     );
     // Consider later stops that are better aligned with the destination. The
     // final-mile builder decides whether the remaining distance is walkable or
@@ -92,6 +98,7 @@ class OfflineRaptorRouter {
       toLon,
       preferred: toStopId,
       maxDistanceMeters: 3000,
+      walkingSpeed: walkingSpeed,
     );
     if (origin.isEmpty || destination.isEmpty) {
       return null;
@@ -164,12 +171,30 @@ class OfflineRaptorRouter {
         toLon: toLon,
         destinationStop: candidate.destination,
         label: candidate.label,
+        walkingSpeed: walkingSpeed,
       );
       itineraries.addAll(
         (route['itineraries'] as List).whereType<Map<String, dynamic>>(),
       );
     }
+    double preferenceCost(Map<String, dynamic> itinerary) {
+      final duration =
+          (itinerary['duration'] as num?)?.toDouble() ?? double.infinity;
+      if (walkingPreference == 'standard') return duration;
+      final walking = (itinerary['walkingSeconds'] as num?)?.toDouble() ?? 0;
+      final transfers = (itinerary['transferCount'] as num?)?.toDouble() ?? 0;
+      final walkingWeight = walkingPreference == 'step_free' ? 2.0 : 1.5;
+      final transferPenalty = walkingPreference == 'step_free' ? 480 : 240;
+      return duration +
+          walking * (walkingWeight - 1) +
+          transfers * transferPenalty;
+    }
+
     itineraries.sort((left, right) {
+      final preferenceComparison = preferenceCost(
+        left,
+      ).compareTo(preferenceCost(right));
+      if (preferenceComparison != 0) return preferenceComparison;
       final distanceComparison =
           ((left['distanceMeters'] as num?)?.toDouble() ?? double.infinity)
               .compareTo(
@@ -217,25 +242,13 @@ class OfflineRaptorRouter {
     return _data!;
   }
 
-  /// Loads the encoded polylines for the rail shapes
-  Future<Map<String, String>> _loadShapes() async {
-    if (_railShapes != null) return _railShapes!;
-    try {
-      final raw = await rootBundle.loadString('assets/transit/rail_shapes.json');
-      final decoded = jsonDecode(raw) as Map;
-      _railShapes = decoded.map((key, value) => MapEntry(key.toString(), value.toString()));
-    } catch (e) {
-      _railShapes = {};
-    }
-    return _railShapes!;
-  }
-
   List<_NearbyStop> _nearby(
     Map<String, dynamic> stops,
     double lat,
     double lon, {
     String? preferred,
     double maxDistanceMeters = 800,
+    double walkingSpeed = 1.25,
   }) {
     final choices = <_NearbyStop>[];
     final preferredId = _resolveStopId(preferred, stops);
@@ -244,7 +257,13 @@ class OfflineRaptorRouter {
       final stopLat = (stop[1] as num).toDouble();
       final stopLon = (stop[2] as num).toDouble();
       choices.add(
-        _NearbyStop(preferredId, _distance(lat, lon, stopLat, stopLon).round()),
+        _NearbyStop(
+          preferredId,
+          math.max(
+            30,
+            (_distance(lat, lon, stopLat, stopLon) / walkingSpeed).round(),
+          ),
+        ),
       );
       // A tapped transit stop is an explicit destination/origin. Do not
       // replace it with a nearby earlier station simply because another stop
@@ -263,7 +282,10 @@ class OfflineRaptorRouter {
       );
       if (distance <= maxDistanceMeters) {
         choices.add(
-          _NearbyStop(entry.key, math.max(30, (distance / 1.25).round())),
+          _NearbyStop(
+            entry.key,
+            math.max(30, (distance / walkingSpeed).round()),
+          ),
         );
       }
     }
@@ -296,7 +318,8 @@ class OfflineRaptorRouter {
         final departure = trip.nextDeparture(index, label.arrival);
 
         // If the next departure is more than 45 minutes away, do not wait on the platform
-        final isWaitReasonable = departure != null && (departure - label.arrival) <= 2700;
+        final isWaitReasonable =
+            departure != null && (departure - label.arrival) <= 2700;
 
         if (departure != null &&
             departure - label.arrival <= _maximumTransitWaitSeconds &&
@@ -411,7 +434,6 @@ class OfflineRaptorRouter {
 
   Map<String, dynamic> _toItinerary({
     required Map<String, dynamic> data,
-    required Map<String, String> shapes, // Added shapes parameter
     required DateTime departure,
     required int startSeconds,
     required double fromLat,
@@ -420,6 +442,7 @@ class OfflineRaptorRouter {
     required double toLon,
     required String destinationStop,
     required _Label label,
+    required double walkingSpeed,
   }) {
     final stops = Map<String, dynamic>.from(data['stops'] as Map);
     final routes = Map<String, dynamic>.from(data['routes'] as Map);
@@ -502,12 +525,6 @@ class OfflineRaptorRouter {
           for (var n = ride.fromIndex + 1; n < ride.toIndex; n++)
             _place(ride.trip.calls[n].stopId, stops),
         ],
-        // --- INJECT CURVED GEOMETRY HERE ---
-        if (polyline != null)
-          'legGeometry': {
-            'points': polyline,
-            'precision': 5,
-          },
       });
     }
 
@@ -539,7 +556,7 @@ class OfflineRaptorRouter {
       // Keep the public-transport itinerary complete with a walking final
       // mile. _lastMileEhailingAlternatives converts this leg into an
       // optional e-hailing alternative; it must not be the only option.
-      final walkSeconds = math.max(60, (finalWalk / 1.35).round());
+      final walkSeconds = math.max(60, (finalWalk / walkingSpeed).round());
       legs.add({
         'mode': 'WALK',
         'startTime': _iso(departure, lastArrival),
