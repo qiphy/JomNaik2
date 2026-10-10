@@ -214,6 +214,7 @@ class _MapViewState extends State<MapView> {
   CameraPosition? _lastCameraPosition;
   int _weatherRequestVersion = 0;
   int _itineraryRenderGeneration = 0;
+  bool _itineraryUserInteracted = false;
   List<PlaceSearchResult> _placeSearchResults = const [];
   PlaceSearchResult? _selectedPlace;
   bool _isSearchingPlaces = false;
@@ -1396,6 +1397,7 @@ class _MapViewState extends State<MapView> {
     // never make a valid itinerary appear to have failed to load.
     setState(() {
       _currentItinerary = Itinerary.fromJson(itinerary);
+      _itineraryUserInteracted = false;
       _isJourneyGuidanceActive = false;
       _hasCompletedCurrentJourney = false;
       _guidedLegIndex = 0;
@@ -1643,6 +1645,27 @@ class _MapViewState extends State<MapView> {
 
   bool _isCurrentItineraryRender(int generation) =>
       mounted && generation == _itineraryRenderGeneration;
+
+  void _markItineraryUserInteracted() {
+    if (_itineraryUserInteracted) return;
+    _itineraryUserInteracted = true;
+
+    // Route geometry is rendered asynchronously and its final step fits the
+    // route into the map. If that animation has already started when the user
+    // begins scrolling the sheet, freeze the current camera immediately.
+    final controller = _mapController;
+    final camera = _lastCameraPosition;
+    if (controller == null || camera == null) return;
+    unawaited(() async {
+      try {
+        await controller.moveCamera(CameraUpdate.newCameraPosition(camera));
+      } catch (error) {
+        debugPrint(
+          '[JomRide][map] Could not stop route camera animation: $error',
+        );
+      }
+    }());
+  }
 
   Future<void> _renderItinerary(
     List<Map<String, dynamic>> legs,
@@ -2600,7 +2623,8 @@ class _MapViewState extends State<MapView> {
       );
     }
 
-    if (_isCurrentItineraryRender(renderGeneration)) {
+    if (_isCurrentItineraryRender(renderGeneration) &&
+        !_itineraryUserInteracted) {
       await _focusItineraryOnMap(routeCoordinates);
     }
   }
@@ -4329,13 +4353,14 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _openEhailingStore() async {
-    final storeUri = defaultTargetPlatform == TargetPlatform.iOS
-        ? Uri.parse('https://apps.apple.com/my/search?term=e-hailing')
-        : Uri.parse(
-            'https://play.google.com/store/search?q=e-hailing%20Malaysia&c=apps',
-          );
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final storeUri = Uri.parse(
+      isIos
+          ? 'https://apps.apple.com/my/search?term=e-hailing'
+          : 'https://play.google.com/store/search?q=e-hailing%20Malaysia&c=apps',
+    );
     if (!await launchUrl(storeUri, mode: LaunchMode.externalApplication)) {
-      _showMessage('Could not open the app store.');
+      _showMessage('Could not open the ${isIos ? 'App Store' : 'Play Store'}.');
     }
   }
 
@@ -4727,6 +4752,10 @@ class _MapViewState extends State<MapView> {
                           // block map scrolling at the native map while the
                           // itinerary is open.
                           scrollGesturesEnabled: _currentItinerary == null,
+                          zoomGesturesEnabled: _currentItinerary == null,
+                          rotateGesturesEnabled: _currentItinerary == null,
+                          tiltGesturesEnabled: _currentItinerary == null,
+                          doubleClickZoomEnabled: _currentItinerary == null,
                           onMapCreated: _onMapCreated,
                           onMapClick: (point, coordinate) =>
                               _handleMapStartPick(point, coordinate),
@@ -4795,322 +4824,362 @@ class _MapViewState extends State<MapView> {
                         DraggableScrollableSheet(
                           initialChildSize: 0.25,
                           minChildSize: 0.15,
-                          maxChildSize: 0.6,
+                          maxChildSize: 1,
                           builder: (BuildContext context, ScrollController scrollController) {
-                            return Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: const BorderRadius.vertical(
-                                  top: Radius.circular(20),
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black12,
-                                    blurRadius: 10,
-                                    spreadRadius: 2,
-                                  ),
-                                ],
-                              ),
-                              child: ListView.builder(
-                                controller: scrollController,
-                                padding: EdgeInsets.zero,
-                                itemCount: _currentItinerary!.legs.length + 1,
-                                itemBuilder: (context, index) {
-                                  if (index == 0) {
-                                    // Header Summary Card
-                                    final weatherReminder =
-                                        _weatherItineraryReminder(
-                                          _currentItinerary!,
-                                        );
-                                    return Padding(
-                                      padding: const EdgeInsets.fromLTRB(
-                                        16,
-                                        4,
-                                        16,
-                                        16,
+                            return NotificationListener<
+                              DraggableScrollableNotification
+                            >(
+                              onNotification: (notification) {
+                                if ((notification.extent - 0.25).abs() >
+                                    0.005) {
+                                  _markItineraryUserInteracted();
+                                }
+                                return false;
+                              },
+                              child: NotificationListener<ScrollNotification>(
+                                onNotification: (notification) {
+                                  if (notification is ScrollStartNotification &&
+                                      notification.dragDetails != null) {
+                                    _markItineraryUserInteracted();
+                                  }
+                                  return false;
+                                },
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: const BorderRadius.vertical(
+                                      top: Radius.circular(20),
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black12,
+                                        blurRadius: 10,
+                                        spreadRadius: 2,
                                       ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Center(
-                                            child: Container(
-                                              width: 40,
-                                              height: 5,
-                                              decoration: BoxDecoration(
-                                                color: Colors.grey[300],
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
-                                              ),
-                                            ),
+                                    ],
+                                  ),
+                                  child: ListView.builder(
+                                    controller: scrollController,
+                                    padding: EdgeInsets.zero,
+                                    itemCount:
+                                        _currentItinerary!.legs.length + 1,
+                                    itemBuilder: (context, index) {
+                                      if (index == 0) {
+                                        // Header Summary Card
+                                        final weatherReminder =
+                                            _weatherItineraryReminder(
+                                              _currentItinerary!,
+                                            );
+                                        return Padding(
+                                          padding: const EdgeInsets.fromLTRB(
+                                            16,
+                                            4,
+                                            16,
+                                            16,
                                           ),
-                                          const SizedBox(height: 12),
-                                          Row(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
                                             children: [
-                                              Expanded(
-                                                child: Text(
-                                                  'Total Travel Time: ${_formatDuration(_currentItinerary!.duration)}',
-                                                  style: const TextStyle(
-                                                    fontSize: 18,
-                                                    fontWeight: FontWeight.bold,
+                                              Center(
+                                                child: Container(
+                                                  width: 40,
+                                                  height: 5,
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.grey[300],
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
                                                   ),
                                                 ),
                                               ),
-                                              IconButton(
-                                                tooltip: 'Close itinerary',
-                                                icon: const Icon(Icons.close),
-                                                onPressed: _dismissItinerary,
-                                              ),
-                                            ],
-                                          ),
-                                          if (_currentItinerary!.fareAmount !=
-                                              null)
-                                            Padding(
-                                              padding: const EdgeInsets.only(
-                                                top: 4,
-                                              ),
-                                              child: Text(
-                                                '${_currentItinerary!.fareLabel ?? 'Estimated fare'}: ${_fareLabel(_currentItinerary!)}',
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.w700,
-                                                ),
-                                              ),
-                                            ),
-                                          if (_currentItinerary!
-                                                  .fallbackMessage !=
-                                              null) ...[
-                                            const SizedBox(height: 8),
-                                            Text(
-                                              _currentItinerary!
-                                                  .fallbackMessage!,
-                                              style: TextStyle(
-                                                color: Colors.orange[800],
-                                              ),
-                                            ),
-                                          ],
-                                          if (weatherReminder != null) ...[
-                                            const SizedBox(height: 8),
-                                            Container(
-                                              width: double.infinity,
-                                              padding: const EdgeInsets.all(10),
-                                              decoration: BoxDecoration(
-                                                color: Colors.blue.shade50,
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
-                                              ),
-                                              child: Row(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
+                                              const SizedBox(height: 12),
+                                              Row(
                                                 children: [
-                                                  const Icon(
-                                                    Icons.umbrella_outlined,
-                                                    color: Colors.blue,
-                                                  ),
-                                                  const SizedBox(width: 8),
                                                   Expanded(
                                                     child: Text(
-                                                      weatherReminder,
+                                                      'Total Travel Time: ${_formatDuration(_currentItinerary!.duration)}',
+                                                      style: const TextStyle(
+                                                        fontSize: 18,
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                      ),
                                                     ),
+                                                  ),
+                                                  IconButton(
+                                                    tooltip: 'Close itinerary',
+                                                    icon: const Icon(
+                                                      Icons.close,
+                                                    ),
+                                                    onPressed:
+                                                        _dismissItinerary,
                                                   ),
                                                 ],
                                               ),
-                                            ),
-                                          ],
-                                          const SizedBox(height: 8),
-                                          _buildJourneyGuidanceCard(),
-                                        ],
-                                      ),
-                                    );
-                                  }
+                                              if (_currentItinerary!
+                                                      .fareAmount !=
+                                                  null)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        top: 4,
+                                                      ),
+                                                  child: Text(
+                                                    '${_currentItinerary!.fareLabel ?? 'Estimated fare'}: ${_fareLabel(_currentItinerary!)}',
+                                                    style: const TextStyle(
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                                  ),
+                                                ),
+                                              if (_currentItinerary!
+                                                      .fallbackMessage !=
+                                                  null) ...[
+                                                const SizedBox(height: 8),
+                                                Text(
+                                                  _currentItinerary!
+                                                      .fallbackMessage!,
+                                                  style: TextStyle(
+                                                    color: Colors.orange[800],
+                                                  ),
+                                                ),
+                                              ],
+                                              if (weatherReminder != null) ...[
+                                                const SizedBox(height: 8),
+                                                Container(
+                                                  width: double.infinity,
+                                                  padding: const EdgeInsets.all(
+                                                    10,
+                                                  ),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.blue.shade50,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                  child: Row(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      const Icon(
+                                                        Icons.umbrella_outlined,
+                                                        color: Colors.blue,
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Expanded(
+                                                        child: Text(
+                                                          weatherReminder,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ],
+                                              const SizedBox(height: 8),
+                                              _buildJourneyGuidanceCard(),
+                                            ],
+                                          ),
+                                        );
+                                      }
 
-                                  final leg =
-                                      _currentItinerary!.legs[index - 1];
-                                  final isWalk =
-                                      leg.mode.toUpperCase() == 'WALK';
-                                  final isHail =
-                                      leg.mode.toUpperCase() == 'HAIL';
-                                  if (isWalk) {
-                                    final walkwayLabel = leg.isSheltered
-                                        ? 'Covered walkway'
-                                        : 'Open walkway';
-                                    final walkPrefix =
-                                        leg.isNearestStationAccess
-                                        ? 'Walk via nearest pedestrian road to:'
-                                        : leg.isTransferWalk
-                                        ? 'Transfer via pedestrian route to'
-                                        : 'Walk to';
-                                    return ListTile(
-                                      leading: Icon(
-                                        Icons.umbrella_outlined,
-                                        color: leg.isSheltered
-                                            ? Colors.teal
-                                            : Colors.grey,
-                                      ),
-                                      title: Text(
-                                        '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
-                                      ),
-                                      subtitle: Text(
-                                        '$walkwayLabel • ${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)}',
-                                      ),
-                                    );
-                                  }
-                                  if (isHail) {
-                                    return ListTile(
-                                      leading: const Icon(
-                                        Icons.local_taxi,
-                                        color: Colors.orange,
-                                      ),
-                                      title: Text(
-                                        leg.routeShortName ??
-                                            'E-hailing estimate',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        '${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)} • ${_fareLabel(_currentItinerary!).isEmpty ? 'Direct distance estimate' : _fareLabel(_currentItinerary!)} planning estimate (RM1–RM3/km; excludes surge and tolls)\nPayment: ${leg.paymentMethod ?? 'Pay in the e-hailing app'}',
-                                      ),
-                                      trailing: TextButton.icon(
-                                        onPressed: _openEhailingStore,
-                                        icon: const Icon(
-                                          Icons.open_in_new,
-                                          size: 16,
-                                        ),
-                                        label: const Text('Find apps'),
-                                      ),
-                                    );
-                                  }
-
-                                  return ExpansionTile(
-                                    leading: Icon(
-                                      Icons.directions_bus,
-                                      color: Colors.green,
-                                    ),
-                                    title: Wrap(
-                                      spacing: 6,
-                                      runSpacing: 2,
-                                      children: [
-                                        Text(
-                                          leg.routeShortName
-                                                      ?.trim()
-                                                      .isNotEmpty ==
-                                                  true
-                                              ? leg.routeShortName!
-                                              : 'Bus',
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
+                                      final leg =
+                                          _currentItinerary!.legs[index - 1];
+                                      final isWalk =
+                                          leg.mode.toUpperCase() == 'WALK';
+                                      final isHail =
+                                          leg.mode.toUpperCase() == 'HAIL';
+                                      if (isWalk) {
+                                        final walkwayLabel = leg.isSheltered
+                                            ? 'Covered walkway'
+                                            : 'Open walkway';
+                                        final walkPrefix =
+                                            leg.isNearestStationAccess
+                                            ? 'Walk via nearest pedestrian road to:'
+                                            : leg.isTransferWalk
+                                            ? 'Transfer via pedestrian route to'
+                                            : 'Walk to';
+                                        return ListTile(
+                                          leading: Icon(
+                                            Icons.umbrella_outlined,
+                                            color: leg.isSheltered
+                                                ? Colors.teal
+                                                : Colors.grey,
                                           ),
-                                        ),
-                                        Text(
-                                          '→ ${leg.headsign ?? 'Direction'}',
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
+                                          title: Text(
+                                            '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
                                           ),
-                                        ),
-                                        if (leg.incidentReports.isNotEmpty)
-                                          const Icon(
-                                            Icons.warning_amber_rounded,
-                                            color: Colors.orange,
+                                          subtitle: Text(
+                                            '$walkwayLabel • ${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)}',
                                           ),
-                                      ],
-                                    ),
-                                    subtitle: Wrap(
-                                      spacing: 8,
-                                      runSpacing: 4,
-                                      children: [
-                                        Text(
-                                          'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
-                                        ),
-                                        Text(
-                                          '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
-                                        ),
-                                        Text(
-                                          'Depart ${_formatTime(leg.startTime)} • Arrive ${_formatTime(leg.endTime)}',
-                                        ),
-                                        if (leg.paymentMethod != null)
-                                          Text(
-                                            '• Payment: ${leg.paymentMethod}',
-                                          ),
-                                        if (leg.liveBusEstimate != null)
-                                          Text(
-                                            'Live arrival: ${leg.liveBusEstimate!.minutesRemaining}${leg.liveBusEstimate!.trafficAdjusted ? ' • Traffic adjusted' : ''}',
-                                            style: const TextStyle(
-                                              color: Colors.green,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                    children: [
-                                      ListTile(
-                                        dense: true,
-                                        leading: const Icon(
-                                          Icons.trip_origin,
-                                          color: Colors.green,
-                                        ),
-                                        title: Text(
-                                          'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
-                                        ),
-                                      ),
-                                      if (leg.incidentReports.isNotEmpty)
-                                        ListTile(
-                                          dense: true,
+                                        );
+                                      }
+                                      if (isHail) {
+                                        return ListTile(
                                           leading: const Icon(
-                                            Icons.warning_amber_rounded,
+                                            Icons.local_taxi,
                                             color: Colors.orange,
                                           ),
                                           title: Text(
-                                            _incidentStatusLabel(
-                                              leg.incidentReports.length,
+                                            leg.routeShortName ??
+                                                'E-hailing estimate',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
                                             ),
                                           ),
                                           subtitle: Text(
-                                            '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'} • ${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
+                                            '${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)} • ${_fareLabel(_currentItinerary!).isEmpty ? 'Direct distance estimate' : _fareLabel(_currentItinerary!)} planning estimate (RM1–RM3/km; excludes surge and tolls)\nPayment: ${leg.paymentMethod ?? 'Pay in the e-hailing app'}',
                                           ),
-                                        ),
-                                      if (leg.intermediateStops.isEmpty)
-                                        const Padding(
-                                          padding: EdgeInsets.fromLTRB(
-                                            72,
-                                            0,
-                                            16,
-                                            8,
-                                          ),
-                                          child: Align(
-                                            alignment: Alignment.centerLeft,
-                                            child: Text(
-                                              'No intermediate stops provided.',
+                                          trailing: TextButton.icon(
+                                            onPressed: _openEhailingStore,
+                                            icon: const Icon(
+                                              Icons.open_in_new,
+                                              size: 16,
+                                            ),
+                                            label: Text(
+                                              defaultTargetPlatform ==
+                                                      TargetPlatform.iOS
+                                                  ? 'App Store'
+                                                  : 'Play Store',
                                             ),
                                           ),
+                                        );
+                                      }
+
+                                      return ExpansionTile(
+                                        leading: Icon(
+                                          Icons.directions_bus,
+                                          color: Colors.green,
                                         ),
-                                      ...leg.intermediateStops
-                                          .asMap()
-                                          .entries
-                                          .map((entry) {
-                                            final index = entry.key;
-                                            final stop = entry.value;
-                                            return ListTile(
-                                              dense: true,
-                                              leading: CircleAvatar(
-                                                radius: 14,
-                                                child: Text('${index + 1}'),
+                                        title: Wrap(
+                                          spacing: 6,
+                                          runSpacing: 2,
+                                          children: [
+                                            Text(
+                                              leg.routeShortName
+                                                          ?.trim()
+                                                          .isNotEmpty ==
+                                                      true
+                                                  ? leg.routeShortName!
+                                                  : 'Bus',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
                                               ),
-                                              title: Text(stop.name),
-                                            );
-                                          }),
-                                      ListTile(
-                                        dense: true,
-                                        leading: const Icon(
-                                          Icons.flag,
-                                          color: Colors.red,
+                                            ),
+                                            Text(
+                                              '→ ${leg.headsign ?? 'Direction'}',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            if (leg.incidentReports.isNotEmpty)
+                                              const Icon(
+                                                Icons.warning_amber_rounded,
+                                                color: Colors.orange,
+                                              ),
+                                          ],
                                         ),
-                                        title: Text(
-                                          'Alight at ${leg.toPlace?.name ?? 'your destination'}',
+                                        subtitle: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 4,
+                                          children: [
+                                            Text(
+                                              'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
+                                            ),
+                                            Text(
+                                              '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
+                                            ),
+                                            Text(
+                                              'Depart ${_formatTime(leg.startTime)} • Arrive ${_formatTime(leg.endTime)}',
+                                            ),
+                                            if (leg.paymentMethod != null)
+                                              Text(
+                                                '• Payment: ${leg.paymentMethod}',
+                                              ),
+                                            if (leg.liveBusEstimate != null)
+                                              Text(
+                                                'Live arrival: ${leg.liveBusEstimate!.minutesRemaining}${leg.liveBusEstimate!.trafficAdjusted ? ' • Traffic adjusted' : ''}',
+                                                style: const TextStyle(
+                                                  color: Colors.green,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                          ],
                                         ),
-                                      ),
-                                    ],
-                                  );
-                                },
+                                        children: [
+                                          ListTile(
+                                            dense: true,
+                                            leading: const Icon(
+                                              Icons.trip_origin,
+                                              color: Colors.green,
+                                            ),
+                                            title: Text(
+                                              'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
+                                            ),
+                                          ),
+                                          if (leg.incidentReports.isNotEmpty)
+                                            ListTile(
+                                              dense: true,
+                                              leading: const Icon(
+                                                Icons.warning_amber_rounded,
+                                                color: Colors.orange,
+                                              ),
+                                              title: Text(
+                                                _incidentStatusLabel(
+                                                  leg.incidentReports.length,
+                                                ),
+                                              ),
+                                              subtitle: Text(
+                                                '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'} • ${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
+                                              ),
+                                            ),
+                                          if (leg.intermediateStops.isEmpty)
+                                            const Padding(
+                                              padding: EdgeInsets.fromLTRB(
+                                                72,
+                                                0,
+                                                16,
+                                                8,
+                                              ),
+                                              child: Align(
+                                                alignment: Alignment.centerLeft,
+                                                child: Text(
+                                                  'No intermediate stops provided.',
+                                                ),
+                                              ),
+                                            ),
+                                          ...leg.intermediateStops
+                                              .asMap()
+                                              .entries
+                                              .map((entry) {
+                                                final index = entry.key;
+                                                final stop = entry.value;
+                                                return ListTile(
+                                                  dense: true,
+                                                  leading: CircleAvatar(
+                                                    radius: 14,
+                                                    child: Text('${index + 1}'),
+                                                  ),
+                                                  title: Text(stop.name),
+                                                );
+                                              }),
+                                          ListTile(
+                                            dense: true,
+                                            leading: const Icon(
+                                              Icons.flag,
+                                              color: Colors.red,
+                                            ),
+                                            title: Text(
+                                              'Alight at ${leg.toPlace?.name ?? 'your destination'}',
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                    },
+                                  ),
+                                ),
                               ),
                             );
                           },
