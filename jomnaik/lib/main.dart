@@ -3518,12 +3518,18 @@ class _MapViewState extends State<MapView> {
     final controller = _mapController;
     if (controller == null) return;
     try {
-      // Use the last camera callback as a fallback: some platform versions
-      // briefly return null from queryCameraPosition after map creation.
-      final camera =
-          await controller.queryCameraPosition() ??
-          _lastCameraPosition ??
-          const CameraPosition(target: LatLng(3.1390, 101.6868), zoom: 12);
+      // maplibre_gl's web implementation throws UnimplementedError for
+      // queryCameraPosition, so web must use the camera callback we track.
+      // Native versions can query the live camera and fall back to that cache.
+      final camera = kIsWeb
+          ? _lastCameraPosition ??
+                const CameraPosition(target: LatLng(3.1390, 101.6868), zoom: 12)
+          : await controller.queryCameraPosition() ??
+                _lastCameraPosition ??
+                const CameraPosition(
+                  target: LatLng(3.1390, 101.6868),
+                  zoom: 12,
+                );
       await controller.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
@@ -4693,6 +4699,10 @@ class _MapViewState extends State<MapView> {
                           onMapCreated: _onMapCreated,
                           onMapClick: (point, coordinate) =>
                               _handleMapStartPick(point, coordinate),
+                          // A transit feature tap is handled by the feature
+                          // listener; it must not also be treated as a plain
+                          // map tap (for example, when choosing a start point).
+                          featureTapsTriggersMapClick: false,
                           onMapLongClick: (_, coordinate) =>
                               _showLongPressedLocation(coordinate),
                           onCameraMove: _onCameraMove,
@@ -4717,6 +4727,9 @@ class _MapViewState extends State<MapView> {
                           right: 16,
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
+                            // Claim taps on the floating search/station panel
+                            // so they cannot fall through to MapLibre beneath it.
+                            onTap: () {},
                             onPanStart: (_) {},
                             onPanUpdate: (_) {},
                             onPanEnd: (_) {},
