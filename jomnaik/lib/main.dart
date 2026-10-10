@@ -4802,6 +4802,21 @@ class _MapViewState extends State<MapView> {
                               : const Point(16, 160),
                         ),
                       ),
+                      // UIKit's native map view can continue receiving pan
+                      // sequences underneath Flutter overlays. When a card
+                      // is open, claim map-area drag gestures in Flutter so
+                      // they never fall through to MapLibre. This layer sits
+                      // below the cards, so their own scrolling and controls
+                      // remain interactive.
+                      if (_areMapActionsBlocked)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (_) {},
+                            onPanUpdate: (_) {},
+                            onPanEnd: (_) {},
+                          ),
+                        ),
                       if (_currentItinerary == null)
                         Positioned(
                           top: 66,
