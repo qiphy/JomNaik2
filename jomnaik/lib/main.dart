@@ -4722,6 +4722,11 @@ class _MapViewState extends State<MapView> {
                           // camera positions when this is enabled. Weather is
                           // keyed to the visible map centre, not device GPS.
                           trackCameraPosition: true,
+                          // iOS MapLibre permits its native pan recognizer to
+                          // run simultaneously with Flutter's sheet drag, so
+                          // block map scrolling at the native map while the
+                          // itinerary is open.
+                          scrollGesturesEnabled: _currentItinerary == null,
                           onMapCreated: _onMapCreated,
                           onMapClick: (point, coordinate) =>
                               _handleMapStartPick(point, coordinate),
