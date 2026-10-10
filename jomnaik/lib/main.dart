@@ -3027,10 +3027,10 @@ class _MapViewState extends State<MapView> {
     });
   }
 
-  Future<void> _startLocationTracking() async {
+  Future<Position?> _startLocationTracking() async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       _showMessage('Turn on location services to show your position.');
-      return;
+      return null;
     }
 
     var permission = await Geolocator.checkPermission();
@@ -3039,11 +3039,11 @@ class _MapViewState extends State<MapView> {
     }
     if (permission == LocationPermission.denied) {
       _showMessage('Location permission was not granted.');
-      return;
+      return null;
     }
     if (permission == LocationPermission.deniedForever) {
       _showMessage('Enable location permission in your device settings.');
-      return;
+      return null;
     }
 
     await _locationSubscription?.cancel();
@@ -3058,11 +3058,14 @@ class _MapViewState extends State<MapView> {
         );
 
     try {
-      await _updateUserLocation(
-        await Geolocator.getCurrentPosition(locationSettings: settings),
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: settings,
       );
+      await _updateUserLocation(position);
+      return position;
     } catch (_) {
       _showMessage('Could not get your current location.');
+      return null;
     }
   }
 
@@ -3488,18 +3491,14 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _showMyLocation() async {
+    final controller = _mapController;
+    if (controller == null) return;
+
+    Position? position;
     try {
-      // This action must request browser/device permission before asking for
-      // a position. Calling getCurrentPosition directly fails on first use.
-      await _startLocationTracking();
-      if (!mounted) return;
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 0,
-        ),
-      );
-      await _updateUserLocation(position);
+      // Request permission and fetch the position once; this also starts the
+      // ongoing location stream used by the rest of the app.
+      position = await _startLocationTracking();
     } catch (error) {
       debugPrint('[JomRide][location] Show-my-location failed: $error');
       if (mounted) {
@@ -3508,9 +3507,7 @@ class _MapViewState extends State<MapView> {
         );
       }
     }
-    final position = _lastKnownPosition;
-    final controller = _mapController;
-    if (position == null || controller == null) return;
+    if (!mounted || position == null) return;
 
     final location = LatLng(position.latitude, position.longitude);
     await _renderUserLocation(controller, position);
@@ -3520,18 +3517,27 @@ class _MapViewState extends State<MapView> {
   Future<void> _showNorth() async {
     final controller = _mapController;
     if (controller == null) return;
-    final camera = await controller.queryCameraPosition();
-    if (camera == null) return;
-    await controller.animateCamera(
-      CameraUpdate.newCameraPosition(
-        CameraPosition(
-          target: camera.target,
-          zoom: camera.zoom,
-          bearing: 0,
-          tilt: camera.tilt,
+    try {
+      // Use the last camera callback as a fallback: some platform versions
+      // briefly return null from queryCameraPosition after map creation.
+      final camera =
+          await controller.queryCameraPosition() ??
+          _lastCameraPosition ??
+          const CameraPosition(target: LatLng(3.1390, 101.6868), zoom: 12);
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: camera.target,
+            zoom: camera.zoom,
+            bearing: 0,
+            tilt: camera.tilt,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      debugPrint('[JomRide][map] Reset-north failed: $error');
+      if (mounted) _showMessage('Could not reset the map direction.');
+    }
   }
 
   Future<void> _loadAndRenderOfflineRailLines() async {
@@ -4379,21 +4385,23 @@ class _MapViewState extends State<MapView> {
     final crowdFuture = station == null ? null : _fetchStationCrowd(station.id);
 
     final colorScheme = Theme.of(context).colorScheme;
+    final isCompact = MediaQuery.sizeOf(context).width < 400;
 
     return Material(
       color: colorScheme.surfaceContainerLow,
       child: InkWell(
         onTap: station == null ? null : _focusNearestStation,
         child: Padding(
-          padding: const EdgeInsets.all(10),
+          padding: EdgeInsets.all(isCompact ? 8 : 10),
           child: Row(
             children: [
               CircleAvatar(
+                radius: isCompact ? 18 : 20,
                 backgroundColor: colorScheme.secondaryContainer,
                 foregroundColor: colorScheme.onSecondaryContainer,
-                child: const Icon(Icons.train),
+                child: Icon(Icons.train, size: isCompact ? 20 : 24),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: isCompact ? 8 : 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -4401,7 +4409,9 @@ class _MapViewState extends State<MapView> {
                   children: [
                     Text(
                       'Nearest station',
-                      style: Theme.of(context).textTheme.titleMedium,
+                      style: isCompact
+                          ? Theme.of(context).textTheme.titleSmall
+                          : Theme.of(context).textTheme.titleMedium,
                     ),
                     station == null
                         ? Text(distanceLabel)
@@ -4413,6 +4423,9 @@ class _MapViewState extends State<MapView> {
                                 '${station.name} • ${crowd?.label ?? 'Low crowd level'}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
+                                style: isCompact
+                                    ? Theme.of(context).textTheme.bodySmall
+                                    : null,
                               );
                             },
                           ),
@@ -4439,6 +4452,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Widget _buildMapTopPanel() {
+    final isCompact = MediaQuery.sizeOf(context).width < 400;
     final hasSearchContent =
         _isSearchOpen &&
         (_placeSearchResults.isNotEmpty || _selectedPlace != null);
@@ -4462,6 +4476,9 @@ class _MapViewState extends State<MapView> {
                 itemBuilder: (context, index) {
                   final place = _placeSearchResults[index];
                   return ListTile(
+                    dense: isCompact,
+                    visualDensity: isCompact ? VisualDensity.compact : null,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
                     title: Text(place.name),
                     subtitle: Text(
                       place.address,
@@ -4484,15 +4501,16 @@ class _MapViewState extends State<MapView> {
               child: Row(
                 children: [
                   CircleAvatar(
+                    radius: isCompact ? 18 : 20,
                     backgroundColor: Theme.of(
                       context,
                     ).colorScheme.primaryContainer,
                     foregroundColor: Theme.of(
                       context,
                     ).colorScheme.onPrimaryContainer,
-                    child: const Icon(Icons.place),
+                    child: Icon(Icons.place, size: isCompact ? 20 : 24),
                   ),
-                  const SizedBox(width: 12),
+                  SizedBox(width: isCompact ? 8 : 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -4516,6 +4534,13 @@ class _MapViewState extends State<MapView> {
                   const SizedBox(width: 8),
                   FilledButton.tonalIcon(
                     onPressed: _getDirectionsToSelectedPlace,
+                    style: isCompact
+                        ? FilledButton.styleFrom(
+                            minimumSize: const Size(48, 36),
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            visualDensity: VisualDensity.compact,
+                          )
+                        : null,
                     icon: const Icon(Icons.directions, size: 18),
                     label: const Text('Go'),
                   ),
@@ -4617,10 +4642,7 @@ class _MapViewState extends State<MapView> {
               : null,
           title: isMapTab
               ? Padding(
-                  padding: const EdgeInsets.only(
-                    top: 10,
-                    bottom: 10,
-                  ),
+                  padding: const EdgeInsets.only(top: 10, bottom: 10),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       color: Colors.white,
@@ -4657,33 +4679,36 @@ class _MapViewState extends State<MapView> {
                 ? const Center(child: CircularProgressIndicator())
                 : Stack(
                     children: [
-                      MapLibreMap(
-                        initialCameraPosition: const CameraPosition(
-                          target: LatLng(3.1390, 101.6868),
-                          zoom: 12,
+                      AbsorbPointer(
+                        absorbing: _currentItinerary != null,
+                        child: MapLibreMap(
+                          initialCameraPosition: const CameraPosition(
+                            target: LatLng(3.1390, 101.6868),
+                            zoom: 12,
+                          ),
+                          // Native MapLibre only guarantees reporting updated
+                          // camera positions when this is enabled. Weather is
+                          // keyed to the visible map centre, not device GPS.
+                          trackCameraPosition: true,
+                          onMapCreated: _onMapCreated,
+                          onMapClick: (point, coordinate) =>
+                              _handleMapStartPick(point, coordinate),
+                          onMapLongClick: (_, coordinate) =>
+                              _showLongPressedLocation(coordinate),
+                          onCameraMove: _onCameraMove,
+                          onCameraIdle: _onCameraIdle,
+                          styleString: _dynamicStyleString!,
+                          compassEnabled: false,
+                          // MapLibre's web implementation does not support
+                          // custom compass margins. Leave them unset on web;
+                          // native builds retain the layout above the buttons.
+                          compassViewPosition: kIsWeb
+                              ? CompassViewPosition.topRight
+                              : CompassViewPosition.bottomRight,
+                          compassViewMargins: kIsWeb
+                              ? null
+                              : const Point(16, 160),
                         ),
-                        // Native MapLibre only guarantees reporting updated
-                        // camera positions when this is enabled. Weather is
-                        // keyed to the visible map centre, not device GPS.
-                        trackCameraPosition: true,
-                        onMapCreated: _onMapCreated,
-                        onMapClick: (point, coordinate) =>
-                            _handleMapStartPick(point, coordinate),
-                        onMapLongClick: (_, coordinate) =>
-                            _showLongPressedLocation(coordinate),
-                        onCameraMove: _onCameraMove,
-                        onCameraIdle: _onCameraIdle,
-                        styleString: _dynamicStyleString!,
-                        compassEnabled: false,
-                        // MapLibre's web implementation does not support
-                        // custom compass margins. Leave them unset on web;
-                        // native builds retain the layout above the buttons.
-                        compassViewPosition: kIsWeb
-                            ? CompassViewPosition.topRight
-                            : CompassViewPosition.bottomRight,
-                        compassViewMargins: kIsWeb
-                            ? null
-                            : const Point(16, 160),
                       ),
                       if (_currentItinerary == null)
                         Positioned(
@@ -5076,7 +5101,7 @@ class _MapViewState extends State<MapView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  FloatingActionButton(
+                  FloatingActionButton.small(
                     heroTag: 'show-north',
                     onPressed: _showNorth,
                     tooltip: 'Show north',
@@ -5084,8 +5109,8 @@ class _MapViewState extends State<MapView> {
                     foregroundColor: Colors.black,
                     child: const Icon(Icons.navigation, color: Colors.black),
                   ),
-                  const SizedBox(height: 12),
-                  FloatingActionButton(
+                  const SizedBox(height: 8),
+                  FloatingActionButton.small(
                     heroTag: 'my-location',
                     onPressed: _showMyLocation,
                     tooltip: 'Show my location',
