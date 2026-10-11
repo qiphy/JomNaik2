@@ -68,6 +68,8 @@ class ItineraryLeg {
     this.isNearestStationAccess = false,
     this.paymentMethod,
     this.liveBusEstimate,
+    this.distanceMeters,
+    this.distanceToDestinationMeters,
     this.intermediateStops = const [],
     this.incidentReports = const [],
   });
@@ -94,6 +96,9 @@ class ItineraryLeg {
       isNearestStationAccess: json['isNearestStationAccess'] == true,
       paymentMethod: json['paymentMethod']?.toString(),
       liveBusEstimate: LiveBusEstimate.fromJsonOrNull(json['liveBusEstimate']),
+      distanceMeters: (json['distanceMeters'] as num?)?.toDouble(),
+      distanceToDestinationMeters:
+          (json['distanceToDestinationMeters'] as num?)?.toDouble(),
       intermediateStops: _intermediateStopsFromJson(json['intermediateStops']),
       incidentReports: _legIncidentsFromJson(json['incidentReports']),
     );
@@ -111,6 +116,8 @@ class ItineraryLeg {
   final bool isNearestStationAccess;
   final String? paymentMethod;
   final LiveBusEstimate? liveBusEstimate;
+  final double? distanceMeters;
+  final double? distanceToDestinationMeters;
   final List<IntermediateStop> intermediateStops;
   final List<LegIncident> incidentReports;
 
@@ -125,19 +132,28 @@ class LegIncident {
     required this.stationName,
     required this.type,
     this.route,
+    this.comment,
   });
 
   factory LegIncident.fromJson(Map<String, dynamic> json) => LegIncident(
     stationName: json['stationName']?.toString() ?? 'Affected station',
     type: json['type']?.toString() ?? 'disruption',
     route: json['route']?.toString(),
+    comment: json['comment']?.toString(),
   );
 
   final String stationName;
   final String type;
   final String? route;
+  final String? comment;
 
-  String get label => formatIncidentLabel(type, route);
+  String get label {
+    final base = formatIncidentLabel(type, route);
+    if (comment != null && comment!.trim().isNotEmpty) {
+      return '$base • "${comment!.trim()}"';
+    }
+    return base;
+  }
 }
 
 class LiveBusEstimate {
@@ -232,7 +248,166 @@ String formatIncidentLabel(String type, String? route) {
     'busNotArrived' => '$bus has not arrived for over 10 minutes',
     'busCrowding' => '$bus crowding reported',
     'busBreakdown' => '$bus breakdown or service issue reported',
+    'busReroute' => '$bus rerouted or detour reported',
     'busSafety' => '$bus safety or accessibility issue reported',
     _ => 'Service disruption reported',
   };
+}
+
+/// Checks whether an itinerary can actually be taken at the requested departure time,
+/// ensuring transit services are actively operating without requiring long platform or
+/// overnight transfer waits.
+bool isItineraryMapAvailableAtDeparture(
+  Map<String, dynamic> itinerary,
+  DateTime requestedDeparture, {
+  Duration maxPlatformWait = const Duration(minutes: 45),
+  Duration maxTransferWait = const Duration(minutes: 60),
+}) {
+  final category = itinerary['routeCategory']?.toString().toLowerCase();
+  // Pure direct walking and pure direct e-hailing are always available immediately
+  if (category == 'walking' || category == 'walk' || category == 'ehailing') {
+    return true;
+  }
+
+  final rawLegs = itinerary['legs'];
+  if (rawLegs is! List || rawLegs.isEmpty) return false;
+
+  final legs = rawLegs
+      .whereType<Map>()
+      .map((l) => Map<String, dynamic>.from(l))
+      .toList();
+
+  final transitLegs = <Map<String, dynamic>>[];
+  for (final leg in legs) {
+    final mode = leg['mode']?.toString().toUpperCase();
+    if (mode != null && mode != 'WALK' && mode != 'HAIL') {
+      transitLegs.add(leg);
+    }
+  }
+
+  // If there are no transit legs (e.g. direct walk or hail), it can be taken immediately
+  if (transitLegs.isEmpty) {
+    return true;
+  }
+
+  // 1. Check the first leg of the whole journey:
+  // Can it begin at the requested departure time?
+  final firstLeg = legs.first;
+  final firstLegStartStr = firstLeg['startTime']?.toString();
+  if (firstLegStartStr != null) {
+    final firstLegStart = DateTime.tryParse(firstLegStartStr);
+    if (firstLegStart != null) {
+      // If the first leg starts more than 45 minutes after requested time,
+      // it cannot be taken at the requested departure time.
+      if (firstLegStart.difference(requestedDeparture).inMinutes > 45) {
+        return false;
+      }
+      // If the first leg departure is in the past by more than 5 minutes:
+      if (requestedDeparture.difference(firstLegStart).inMinutes > 5) {
+        return false;
+      }
+    }
+  }
+
+  // 2. Check the first transit leg:
+  // How long does the user wait at the platform before the first transit vehicle arrives?
+  final firstTransit = transitLegs.first;
+  final firstTransitStartStr = firstTransit['startTime']?.toString();
+  if (firstTransitStartStr == null) return false;
+  final firstTransitStart = DateTime.tryParse(firstTransitStartStr);
+  if (firstTransitStart == null) return false;
+
+  DateTime userArrivalAtTransitStop = requestedDeparture;
+  final firstTransitIndex = legs.indexOf(firstTransit);
+  if (firstTransitIndex > 0) {
+    final priorLeg = legs[firstTransitIndex - 1];
+    final priorEndStr = priorLeg['endTime']?.toString();
+    if (priorEndStr != null) {
+      userArrivalAtTransitStop =
+          DateTime.tryParse(priorEndStr) ?? requestedDeparture;
+    }
+  }
+
+  final initialPlatformWait =
+      firstTransitStart.difference(userArrivalAtTransitStop);
+  if (initialPlatformWait.inSeconds < -60 ||
+      initialPlatformWait > maxPlatformWait) {
+    return false;
+  }
+
+  // 3. Check transfers between subsequent transit legs
+  for (var i = 1; i < transitLegs.length; i++) {
+    final prevTransit = transitLegs[i - 1];
+    final currTransit = transitLegs[i];
+    final prevEndStr = prevTransit['endTime']?.toString();
+    final currStartStr = currTransit['startTime']?.toString();
+    if (prevEndStr != null && currStartStr != null) {
+      final prevEnd = DateTime.tryParse(prevEndStr);
+      final currStart = DateTime.tryParse(currStartStr);
+      if (prevEnd != null && currStart != null) {
+        final transferWait = currStart.difference(prevEnd);
+        if (transferWait.inSeconds < -60 || transferWait > maxTransferWait) {
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+extension ItineraryAvailabilityExtension on Itinerary {
+  bool isAvailableAtDeparture(
+    DateTime requestedDeparture, {
+    Duration maxPlatformWait = const Duration(minutes: 45),
+    Duration maxTransferWait = const Duration(minutes: 60),
+  }) {
+    final transitLegs = legs.where(
+      (l) => l.mode != 'WALK' && l.mode != 'HAIL',
+    ).toList();
+
+    if (transitLegs.isEmpty) return true;
+
+    final firstLegStart = DateTime.tryParse(legs.first.startTime);
+    if (firstLegStart != null) {
+      if (firstLegStart.difference(requestedDeparture).inMinutes > 45) {
+        return false;
+      }
+      if (requestedDeparture.difference(firstLegStart).inMinutes > 5) {
+        return false;
+      }
+    }
+
+    final firstTransit = transitLegs.first;
+    final firstTransitStart = DateTime.tryParse(firstTransit.startTime);
+    if (firstTransitStart == null) return false;
+
+    DateTime userArrivalAtTransitStop = requestedDeparture;
+    final firstTransitIndex = legs.indexOf(firstTransit);
+    if (firstTransitIndex > 0) {
+      userArrivalAtTransitStop =
+          DateTime.tryParse(legs[firstTransitIndex - 1].endTime) ??
+          requestedDeparture;
+    }
+
+    final initialPlatformWait =
+        firstTransitStart.difference(userArrivalAtTransitStop);
+    if (initialPlatformWait.inSeconds < -60 ||
+        initialPlatformWait > maxPlatformWait) {
+      return false;
+    }
+
+    for (var i = 1; i < transitLegs.length; i++) {
+      final prevEnd = DateTime.tryParse(transitLegs[i - 1].endTime);
+      final currStart = DateTime.tryParse(transitLegs[i].startTime);
+      if (prevEnd != null && currStart != null) {
+        final transferWait = currStart.difference(prevEnd);
+        if (transferWait.inSeconds < -60 || transferWait > maxTransferWait) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
 }

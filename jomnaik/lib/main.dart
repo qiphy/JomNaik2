@@ -46,9 +46,6 @@ const _supabasePublishableKey = String.fromEnvironment(
 );
 const _completedJourneysKey = 'completed_journeys_v1';
 const _completedJourneyLimit = 20;
-// Temporary incident-report test hook. Remove once station selection is wired
-// to the station details sheet.
-const _temporaryIncidentReportStopId = 'rapid-kl-rail:KJ15';
 const _privacyStorage = FlutterSecureStorage();
 
 enum _StartChoice { currentLocation, search, map }
@@ -87,17 +84,44 @@ Future<void> main() async {
   runApp(const JomRideApp());
 }
 
+final ValueNotifier<ThemeMode> themeModeNotifier =
+    ValueNotifier<ThemeMode>(ThemeMode.light);
+
 class JomRideApp extends StatelessWidget {
   const JomRideApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: 'JomRide',
-      home: StartupScreen(
-        nextScreen: MapView(),
-        storage: _privacyStorage,
-      ),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (context, currentMode, _) {
+        return MaterialApp(
+          title: 'JomRide',
+          themeMode: currentMode,
+          theme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.light,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF0D9488),
+              brightness: Brightness.light,
+            ),
+            scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.dark,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF0D9488),
+              brightness: Brightness.dark,
+            ),
+            scaffoldBackgroundColor: const Color(0xFF0F172A),
+          ),
+          home: const StartupScreen(
+            nextScreen: MapView(),
+            storage: _privacyStorage,
+          ),
+        );
+      },
     );
   }
 }
@@ -110,7 +134,7 @@ class MapView extends StatefulWidget {
 }
 
 class _MapViewState extends State<MapView> {
-  static const double _itineraryInitialExtent = 0.45;
+  static const double _itineraryInitialExtent = 0.40;
 
   static const _currentRegion = 'Klang Valley';
   // Bounds read from assets/tiles/klang_valley.pmtiles. Keep route requests
@@ -126,7 +150,13 @@ class _MapViewState extends State<MapView> {
   int _mapGeneration = 0;
   final http.Client _httpClient = http.Client();
   String? _dynamicStyleString;
+  Map<String, dynamic>? _cachedRawStyle;
+  int _mapStyleVersion = 0;
+  bool _isSatelliteMode = false;
+  bool _isCardExpanded = false;
+  bool _isUsingCurrentLocation = true;
   Itinerary? _currentItinerary;
+  Map<String, dynamic>? _currentRawItinerary;
   final _offlineRaptorRouter = OfflineRaptorRouter();
   bool _isJourneyGuidanceActive = false;
   int _guidedLegIndex = 0;
@@ -173,9 +203,8 @@ class _MapViewState extends State<MapView> {
   bool _isSearchOpen = true;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
-  List<TransitStation> _railStations = const [];
   Map<String, TransitStop> _transitStopsById = const {};
-  TransitStation? _nearestStation;
+  TransitStop? _nearestTransitStop;
   int _selectedTab = 0;
   bool _isScrollingCard = false;
   Timer? _scrollCardDebounce;
@@ -195,9 +224,7 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  bool get _canReportIncident =>
-      _isSupabaseConfigured &&
-      Supabase.instance.client.auth.currentUser != null;
+  bool get _canReportIncident => _isSupabaseConfigured;
 
   String get _walkingPreference {
     if (!_isSupabaseConfigured) return 'standard';
@@ -342,6 +369,21 @@ class _MapViewState extends State<MapView> {
     }
   }
 
+  void _toggleTheme() {
+    final next = themeModeNotifier.value == ThemeMode.dark
+        ? ThemeMode.light
+        : ThemeMode.dark;
+    themeModeNotifier.value = next;
+    unawaited(_updateMapStyle());
+  }
+
+  void _toggleSatellite() {
+    setState(() {
+      _isSatelliteMode = !_isSatelliteMode;
+    });
+    unawaited(_updateMapStyle());
+  }
+
   Future<void> _prepareMapData() async {
     try {
       final styleData = jsonDecode(
@@ -350,20 +392,8 @@ class _MapViewState extends State<MapView> {
       if (styleData is! Map<String, dynamic>) {
         throw const FormatException('Map style must be a JSON object.');
       }
-
-      final sources = styleData['sources'];
-      if (sources is! Map<String, dynamic> ||
-          sources['protomaps'] is! Map<String, dynamic>) {
-        throw const FormatException(
-          'Map style does not define a protomaps source.',
-        );
-      }
-      (sources['protomaps'] as Map<String, dynamic>)['url'] =
-          await mapTilesSourceUrl();
-
-      if (!mounted) return;
-      setState(() => _dynamicStyleString = jsonEncode(styleData));
-      print('[JomRide][map] Protomaps PMTiles style assigned');
+      _cachedRawStyle = styleData;
+      await _updateMapStyle();
     } catch (error) {
       debugPrint('Could not prepare offline map style: $error');
       if (mounted) {
@@ -387,6 +417,123 @@ class _MapViewState extends State<MapView> {
         }
         _showMessage('The offline map could not be loaded.');
       }
+    }
+  }
+
+  Future<void> _updateMapStyle() async {
+    final base = _cachedRawStyle;
+    if (base == null) return;
+    try {
+      final styleData = jsonDecode(jsonEncode(base)) as Map<String, dynamic>;
+      final sources = styleData['sources'] as Map<String, dynamic>;
+      final tileUrl = await mapTilesSourceUrl();
+      if (sources['protomaps'] is Map<String, dynamic>) {
+        (sources['protomaps'] as Map<String, dynamic>)['url'] = tileUrl;
+      }
+
+      final isDark = themeModeNotifier.value == ThemeMode.dark;
+      final layers = (styleData['layers'] as List).cast<Map<String, dynamic>>();
+
+      if (_isSatelliteMode) {
+        sources['satellite'] = {
+          'type': 'raster',
+          'tiles': [
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          ],
+          'tileSize': 256,
+        };
+        final satLayer = <String, dynamic>{
+          'id': 'satellite_imagery_layer',
+          'type': 'raster',
+          'source': 'satellite',
+          'minzoom': 0,
+          'maxzoom': 19,
+        };
+        layers.insert(1, satLayer);
+
+        for (final layer in layers) {
+          final id = layer['id']?.toString() ?? '';
+          final type = layer['type']?.toString() ?? '';
+          final sourceLayer = layer['source-layer']?.toString() ?? '';
+          final paint = (layer['paint'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+          layer['paint'] = paint;
+
+          if (type == 'background') {
+            paint['background-color'] = '#000000';
+          } else if (id == 'earth' ||
+              id == 'water' ||
+              id == 'landcover' ||
+              sourceLayer == 'buildings' ||
+              sourceLayer == 'landuse') {
+            paint['fill-opacity'] = 0.0;
+          } else if (sourceLayer == 'roads' && type == 'line') {
+            // In satellite view, make road lines transparent or sufficiently subtle
+            // so imagery remains visible.
+            paint['line-opacity'] = 0.25;
+            paint['line-color'] = '#ffffff';
+          } else if (type == 'symbol') {
+            // Retain road names and all other labels with strong contrast
+            paint['text-color'] = '#ffffff';
+            paint['text-halo-color'] = '#000000';
+            paint['text-halo-width'] = 2.0;
+            paint['icon-opacity'] = 1.0;
+          }
+        }
+      } else if (isDark) {
+        for (final layer in layers) {
+          final id = layer['id']?.toString() ?? '';
+          final type = layer['type']?.toString() ?? '';
+          final sourceLayer = layer['source-layer']?.toString() ?? '';
+          final paint = (layer['paint'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+          layer['paint'] = paint;
+
+          if (type == 'background') {
+            paint['background-color'] = '#0f172a';
+          } else if (id == 'earth') {
+            paint['fill-color'] = '#131b2e';
+          } else if (id == 'water') {
+            paint['fill-color'] = '#0a101d';
+          } else if (id == 'landcover') {
+            paint['fill-color'] = '#102220';
+          } else if (sourceLayer == 'buildings') {
+            paint['fill-color'] = '#182030';
+            paint['fill-opacity'] = 0.6;
+          } else if (sourceLayer == 'roads' && type == 'line') {
+            // In dark mode, render roads in dark colors rather than white,
+            // while keeping roads and labels legible against the dark map background.
+            final isMajor = id.contains('motorway') ||
+                id.contains('trunk') ||
+                id.contains('primary');
+            final isSecondary =
+                id.contains('secondary') || id.contains('tertiary');
+            final isCasing = id.contains('casing') || id.contains('tunnel');
+
+            if (isCasing) {
+              paint['line-color'] = '#162030';
+            } else if (isMajor) {
+              paint['line-color'] = '#384964';
+            } else if (isSecondary) {
+              paint['line-color'] = '#2a374b';
+            } else {
+              paint['line-color'] = '#1f2a3a';
+            }
+          } else if (type == 'symbol') {
+            paint['text-color'] = '#e2e8f0';
+            paint['text-halo-color'] = '#0f172a';
+            paint['text-halo-width'] = 1.5;
+          }
+        }
+      }
+      // Light mode: keeps the authentic previous design of protomaps_light.json unmodified!
+
+      if (!mounted) return;
+      setState(() {
+        _mapStyleVersion++;
+        _dynamicStyleString = jsonEncode(styleData);
+      });
+      print('[JomRide][map] Protomaps PMTiles style assigned (dark=$isDark, sat=$_isSatelliteMode)');
+    } catch (error) {
+      debugPrint('Failed to construct dynamic map style: $error');
     }
   }
 
@@ -654,6 +801,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _showLongPressedLocation(LatLng coordinate) async {
+    if (_currentItinerary != null || _isCardExpanded) return;
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
       _showUnsupportedZone();
       return;
@@ -716,6 +864,7 @@ class _MapViewState extends State<MapView> {
     }
     final startChoice = await _chooseCurrentOrManualStart();
     if (startChoice == null) return;
+    _isUsingCurrentLocation = (startChoice == _StartChoice.currentLocation);
     Position? origin;
     PlaceSearchResult? selectedStart;
     if (startChoice == _StartChoice.currentLocation) {
@@ -828,6 +977,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _handleMapStartPick(dynamic point, LatLng coordinate) async {
+    if (_currentItinerary != null || _isCardExpanded) return;
     final picker = _mapStartPicker;
     if (picker == null || picker.isCompleted) return;
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
@@ -1128,6 +1278,7 @@ class _MapViewState extends State<MapView> {
 
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => RouteChoicesSheet(
         itineraries: itineraries,
@@ -1157,6 +1308,7 @@ class _MapViewState extends State<MapView> {
     // never make a valid itinerary appear to have failed to load.
     setState(() {
       _currentItinerary = Itinerary.fromJson(itinerary);
+      _currentRawItinerary = itinerary;
       _itineraryUserInteracted = false;
       _isJourneyGuidanceActive = false;
       _hasCompletedCurrentJourney = false;
@@ -1169,6 +1321,12 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _startJourneyGuidance() async {
+    if (!_isUsingCurrentLocation) {
+      _showMessage(
+        'Live guidance is only available when starting from your current location.',
+      );
+      return;
+    }
     if (_currentItinerary == null || _currentItinerary!.legs.isEmpty) return;
     if (_isDirectEhailingItinerary(_currentItinerary!)) {
       _showMessage(
@@ -1376,6 +1534,33 @@ class _MapViewState extends State<MapView> {
         _isDirectEhailingItinerary(itinerary)) {
       return const SizedBox.shrink();
     }
+    if (!_isUsingCurrentLocation) {
+      final colorScheme = Theme.of(context).colorScheme;
+      return Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colorScheme.outlineVariant),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.location_disabled, size: 20, color: colorScheme.outline),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Live guidance is disabled because the journey starts from a custom location.',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     final hasCurrentLeg = _guidedLegIndex < itinerary.legs.length;
     final leg = hasCurrentLeg ? itinerary.legs[_guidedLegIndex] : null;
     final atBoardingStop =
@@ -1448,6 +1633,8 @@ class _MapViewState extends State<MapView> {
     _scrollCardDebounce?.cancel();
     setState(() {
       _currentItinerary = null;
+      _currentRawItinerary = null;
+      _isCardExpanded = false;
       _isScrollingCard = false;
       _isJourneyGuidanceActive = false;
       _hasBoardedGuidedTransit = false;
@@ -1517,11 +1704,12 @@ class _MapViewState extends State<MapView> {
     String? fromStopId,
     String? toStopId,
     bool preferBrt = false,
+    DateTime? departure,
   }) async {
     if (_routeRequestInFlight) return null;
     _routeRequestInFlight = true;
     try {
-      final departure = DateTime.now();
+      final when = departure ?? DateTime.now();
       final requestBody = <String, dynamic>{
         'from_lat': fromLat,
         'from_lon': fromLon,
@@ -1530,9 +1718,9 @@ class _MapViewState extends State<MapView> {
         'prefer_brt': preferBrt,
         'walking_preference': _walkingPreference,
         'departure_date':
-            '${departure.year.toString().padLeft(4, '0')}-${departure.month.toString().padLeft(2, '0')}-${departure.day.toString().padLeft(2, '0')}',
+            '${when.year.toString().padLeft(4, '0')}-${when.month.toString().padLeft(2, '0')}-${when.day.toString().padLeft(2, '0')}',
         'departure_time':
-            '${departure.hour.toString().padLeft(2, '0')}:${departure.minute.toString().padLeft(2, '0')}:${departure.second.toString().padLeft(2, '0')}',
+            '${when.hour.toString().padLeft(2, '0')}:${when.minute.toString().padLeft(2, '0')}:${when.second.toString().padLeft(2, '0')}',
       };
       if (fromStopId != null) requestBody['from_stop_id'] = fromStopId;
       if (toStopId != null) requestBody['to_stop_id'] = toStopId;
@@ -1553,6 +1741,7 @@ class _MapViewState extends State<MapView> {
           toLon: toLon,
           fromStopId: fromStopId,
           toStopId: toStopId,
+          departure: when,
         );
       }
 
@@ -1565,6 +1754,7 @@ class _MapViewState extends State<MapView> {
       }
 
       final itineraries = responseData['itineraries'] as List<dynamic>;
+
       bool hasTransitItinerary(Iterable<dynamic> candidates) =>
           candidates.any((itinerary) {
             if (itinerary is! Map || itinerary['legs'] is! List) return false;
@@ -1575,11 +1765,14 @@ class _MapViewState extends State<MapView> {
             });
           });
 
-      // A successful backend response can still contain only a direct
-      // e-hailing option. Before presenting that as the only usable route,
-      // query the bundled timetable and convert long access/egress walks into
-      // optional e-hailing connections around transit.
-      if (!hasTransitItinerary(itineraries)) {
+      // Filter itineraries to only keep journeys available at the requested departure time
+      final validItineraries = itineraries.where((it) {
+        if (it is! Map<String, dynamic>) return false;
+        return isItineraryMapAvailableAtDeparture(it, when);
+      }).toList();
+
+      // If backend had no available transit at the departure time, check offline RAPTOR
+      if (!hasTransitItinerary(validItineraries)) {
         try {
           final offlineTransit = await _offlineRaptorRouter.plan(
             fromLat: fromLat,
@@ -1588,64 +1781,56 @@ class _MapViewState extends State<MapView> {
             toLon: toLon,
             fromStopId: fromStopId,
             toStopId: toStopId,
+            departure: when,
             walkingPreference: _walkingPreference,
           );
           final offlineItineraries = offlineTransit?['itineraries'];
-          if (offlineItineraries is List &&
-              hasTransitItinerary(offlineItineraries)) {
-            final combined = {
-              ...responseData,
-              'itineraries': [...offlineItineraries, ...itineraries],
-              'offlineRouting': true,
-            };
-            return _addDirectModeAlternatives(
-              combined,
-              fromLat: fromLat,
-              fromLon: fromLon,
-              toLat: toLat,
-              toLon: toLon,
-            );
+          if (offlineItineraries is List) {
+            final validOffline = offlineItineraries.where((it) {
+              if (it is! Map<String, dynamic>) return false;
+              return isItineraryMapAvailableAtDeparture(it, when);
+            }).toList();
+            if (hasTransitItinerary(validOffline)) {
+              final combined = {
+                ...responseData,
+                'itineraries': [...validOffline, ...validItineraries],
+                'offlineRouting': true,
+              };
+              return _addDirectModeAlternatives(
+                combined,
+                fromLat: fromLat,
+                fromLon: fromLon,
+                toLat: toLat,
+                toLon: toLon,
+                departure: when,
+              );
+            }
           }
         } catch (error) {
           debugPrint('Offline transit supplement failed: $error');
         }
       }
 
-      if (itineraries.isEmpty) {
-        final alternatives = _addDirectModeAlternatives(
-          responseData,
-          fromLat: fromLat,
-          fromLon: fromLon,
-          toLat: toLat,
-          toLon: toLon,
-        );
-        final alternativeItineraries = alternatives['itineraries'];
-        if (alternativeItineraries is List &&
-            alternativeItineraries.isNotEmpty) {
-          return alternatives;
-        }
-        final fallbackMessage = responseData['fallbackMessage'];
-        _showMessage(
-          fallbackMessage is String && fallbackMessage.isNotEmpty
-              ? fallbackMessage
-              : 'No nearby transit stop is available for this location.',
-        );
-        return null;
-      }
-
-      final firstItinerary = itineraries.first;
-      if (firstItinerary is! Map || firstItinerary['legs'] is! List) {
-        _showMessage('The route service returned an invalid itinerary.');
-        return null;
-      }
-
-      return _addDirectModeAlternatives(
-        responseData,
+      final alternatives = _addDirectModeAlternatives(
+        {
+          ...responseData,
+          'itineraries': validItineraries,
+        },
         fromLat: fromLat,
         fromLon: fromLon,
         toLat: toLat,
         toLon: toLon,
+        departure: when,
       );
+
+      final combinedList = alternatives['itineraries'] as List<dynamic>? ?? [];
+      final hasAnyTransit = hasTransitItinerary(combinedList);
+      if (!hasAnyTransit) {
+        _showMessage(
+          'Public transit is not operating at the requested departure time. Showing available alternatives like e-hailing and walking.',
+        );
+      }
+      return alternatives;
     } on FormatException catch (error) {
       _showMessage('The route service returned invalid JSON.');
       debugPrint('Invalid route JSON: $error');
@@ -1659,6 +1844,7 @@ class _MapViewState extends State<MapView> {
         toLon: toLon,
         fromStopId: fromStopId,
         toStopId: toStopId,
+        departure: departure,
       );
     } on TimeoutException {
       return _offlineRoute(
@@ -1668,6 +1854,7 @@ class _MapViewState extends State<MapView> {
         toLon: toLon,
         fromStopId: fromStopId,
         toStopId: toStopId,
+        departure: departure,
       );
     } catch (error) {
       _showMessage('Could not calculate the route.');
@@ -1685,18 +1872,22 @@ class _MapViewState extends State<MapView> {
     required double toLon,
     String? fromStopId,
     String? toStopId,
+    DateTime? departure,
   }) async {
+    final when = departure ?? DateTime.now();
     final directEhailing = _offlineEhailingItinerary(
       fromLat: fromLat,
       fromLon: fromLon,
       toLat: toLat,
       toLon: toLon,
+      departure: when,
     );
     final directWalking = _offlineWalkingItinerary(
       fromLat: fromLat,
       fromLon: fromLon,
       toLat: toLat,
       toLon: toLon,
+      departure: when,
     );
     try {
       final result = await _offlineRaptorRouter.plan(
@@ -1706,27 +1897,37 @@ class _MapViewState extends State<MapView> {
         toLon: toLon,
         fromStopId: fromStopId,
         toStopId: toStopId,
+        departure: when,
         walkingPreference: _walkingPreference,
       );
       if (result != null) {
-        final alternatives = _addDirectModeAlternatives(
-          result,
-          fromLat: fromLat,
-          fromLon: fromLon,
-          toLat: toLat,
-          toLon: toLon,
-        );
-        return _applyIncidentRisk(alternatives);
+        final rawItineraries = result['itineraries'] as List? ?? [];
+        final validItineraries = rawItineraries.where((it) {
+          if (it is! Map<String, dynamic>) return false;
+          return isItineraryMapAvailableAtDeparture(it, when);
+        }).toList();
+
+        if (validItineraries.isNotEmpty) {
+          final alternatives = _addDirectModeAlternatives(
+            {...result, 'itineraries': validItineraries},
+            fromLat: fromLat,
+            fromLon: fromLon,
+            toLat: toLat,
+            toLon: toLon,
+            departure: when,
+          );
+          return _applyIncidentRisk(alternatives);
+        }
       }
     } catch (error) {
       debugPrint('Offline RAPTOR route error: $error');
     }
     _showMessage(
-      'Using direct e-hailing estimate. Live updates are unavailable.',
+      'Public transit is not operating at the requested departure time. Showing available alternatives like e-hailing and walking.',
     );
     return {
       'itineraries': [
-        if (directWalking != null) directWalking,
+        directWalking,
         if (Geolocator.distanceBetween(fromLat, fromLon, toLat, toLon) > 1000)
           directEhailing,
       ],
@@ -1820,17 +2021,51 @@ class _MapViewState extends State<MapView> {
         final age = reportedAt == null
             ? const Duration(days: 30)
             : DateTime.now().toUtc().difference(reportedAt.toUtc());
-        final contribution = age <= const Duration(hours: 1)
-            ? 300
-            : age <= const Duration(hours: 6)
-            ? 180
-            : age <= const Duration(days: 1)
-            ? 90
-            : 30;
-        delay += contribution;
+
+        final incidentType = incident['type']?.toString() ?? '';
+        final int baseImpactSeconds;
+        switch (incidentType) {
+          case 'busReroute':
+            // Rerouting or detour causes substantial route adjustment delay
+            baseImpactSeconds = 480; // 8 minutes
+            break;
+          case 'stuckTrain':
+          case 'busBreakdown':
+          case 'breakdown':
+            baseImpactSeconds = 720; // 12 minutes
+            break;
+          case 'disruption':
+            baseImpactSeconds = 600; // 10 minutes
+            break;
+          case 'delay':
+            baseImpactSeconds = 360; // 6 minutes
+            break;
+          case 'crowdedTrain':
+          case 'crowdedStation':
+            baseImpactSeconds = 240; // 4 minutes
+            break;
+          case 'liftFault':
+          case 'escalatorFault':
+            baseImpactSeconds = 120; // 2 minutes
+            break;
+          default:
+            baseImpactSeconds = 180;
+        }
+
+        final double ageFactor = age <= const Duration(hours: 1)
+            ? 1.0
+            : age <= const Duration(hours: 3)
+                ? 0.8
+                : age <= const Duration(hours: 6)
+                    ? 0.5
+                    : age <= const Duration(days: 1)
+                        ? 0.25
+                        : 0.1;
+
+        delay += (baseImpactSeconds * ageFactor).round();
       }
     }
-    return delay.clamp(0, 900);
+    return delay.clamp(0, 1800);
   }
 
   List<Map<String, dynamic>> _incidentsForLeg(
@@ -1918,7 +2153,9 @@ class _MapViewState extends State<MapView> {
     required double fromLon,
     required double toLat,
     required double toLon,
+    DateTime? departure,
   }) {
+    final when = departure ?? DateTime.now();
     final existing = routeData['itineraries'];
     if (existing is! List) return routeData;
 
@@ -1927,9 +2164,12 @@ class _MapViewState extends State<MapView> {
     final convertedExisting = <Map<String, dynamic>>[];
     for (final item in existing) {
       if (item is Map) {
-        convertedExisting.add(
-          _convertExcessiveWalksToEhailing(Map<String, dynamic>.from(item)),
-        );
+        final itMap = Map<String, dynamic>.from(item);
+        if (isItineraryMapAvailableAtDeparture(itMap, when)) {
+          convertedExisting.add(
+            _convertExcessiveWalksToEhailing(itMap),
+          );
+        }
       }
     }
 
@@ -1953,27 +2193,33 @@ class _MapViewState extends State<MapView> {
           fromLon: fromLon,
           toLat: toLat,
           toLon: toLon,
+          departure: when,
         ),
       );
     }
-    final firstMileAlternatives = _firstMileEhailingAlternatives(itineraries);
+    final firstMileAlternatives = _firstMileEhailingAlternatives(itineraries)
+        .where((alt) => isItineraryMapAvailableAtDeparture(alt, when))
+        .toList();
     itineraries.addAll(firstMileAlternatives);
     // Build final-mile variants from both the original transit routes and
     // first-mile variants, so a single itinerary can use transit for its main
     // journey with e-hailing at both ends when needed.
-    itineraries.addAll(
-      _lastMileEhailingAlternatives([
-        ...itineraries,
-        ...firstMileAlternatives,
-      ]),
-    );
+    final lastMileAlternatives = _lastMileEhailingAlternatives([
+      ...itineraries,
+      ...firstMileAlternatives,
+    ])
+        .where((alt) => isItineraryMapAvailableAtDeparture(alt, when))
+        .toList();
+    itineraries.addAll(lastMileAlternatives);
+
     final walking = _offlineWalkingItinerary(
       fromLat: fromLat,
       fromLon: fromLon,
       toLat: toLat,
       toLon: toLon,
+      departure: when,
     );
-    if (walking != null && !hasCategory('walking')) {
+    if (!hasCategory('walking')) {
       itineraries.add(walking);
     }
 
@@ -2343,11 +2589,12 @@ class _MapViewState extends State<MapView> {
     return alternatives;
   }
 
-  Map<String, dynamic>? _offlineWalkingItinerary({
+  Map<String, dynamic> _offlineWalkingItinerary({
     required double fromLat,
     required double fromLon,
     required double toLat,
     required double toLon,
+    DateTime? departure,
   }) {
     final distanceMeters = Geolocator.distanceBetween(
       fromLat,
@@ -2355,15 +2602,12 @@ class _MapViewState extends State<MapView> {
       toLat,
       toLon,
     );
-    // Keep a direct walking option for nearby destinations such as Sunway
-    // Pyramid to Taylor's. The map renderer replaces this estimate with the
-    // pedestrian-network geometry when the itinerary is selected.
-    if (distanceMeters > 5000) return null;
+    // Keep a direct walking option for every journey as a full fallback.
     final walkingSeconds = math.max(
       60,
       (distanceMeters / _walkingSpeedMetersPerSecond).round(),
     );
-    final start = DateTime.now();
+    final start = departure ?? DateTime.now();
     final end = start.add(Duration(seconds: walkingSeconds));
     return {
       'duration': walkingSeconds,
@@ -2390,6 +2634,7 @@ class _MapViewState extends State<MapView> {
     required double fromLon,
     required double toLat,
     required double toLon,
+    DateTime? departure,
   }) {
     final distanceMeters = Geolocator.distanceBetween(
       fromLat,
@@ -2399,7 +2644,7 @@ class _MapViewState extends State<MapView> {
     );
     // A planning estimate only: OSRM supplies the actual line geometry later.
     final drivingSeconds = math.max(300, (distanceMeters / 9.7).round() + 180);
-    final start = DateTime.now();
+    final start = departure ?? DateTime.now();
     final end = start.add(Duration(seconds: drivingSeconds));
     return {
       'duration': drivingSeconds,
@@ -3079,6 +3324,10 @@ class _MapViewState extends State<MapView> {
     ) {
       _queryTappedFeature(point);
     });
+    if (_currentRawItinerary != null) {
+      final legs = _itineraryLegs(_currentRawItinerary!);
+      unawaited(_renderItinerary(legs, _itineraryRenderGeneration));
+    }
   }
 
   Future<Position?> _startLocationTracking() async {
@@ -3139,7 +3388,7 @@ class _MapViewState extends State<MapView> {
     _updateJourneyGuidance(position);
     // Keep the station card's distance in sync with every GPS update, even
     // when the nearest station itself has not changed.
-    _updateNearestStation(position);
+    _updateNearestTransitStop(position);
     // GPS can emit several updates per second on some devices. Station
     // presence tracking and interchange prompts do not need that frequency;
     // keep those more expensive operations to one pass every five seconds.
@@ -3219,9 +3468,9 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  void _updateNearestStation(Position position) {
-    if (_railStations.isEmpty || !mounted) return;
-    final station = _railStations.reduce((closest, candidate) {
+  void _updateNearestTransitStop(Position position) {
+    if (_transitStopsById.isEmpty || !mounted) return;
+    final stop = _transitStopsById.values.reduce((closest, candidate) {
       final closestDistance = Geolocator.distanceBetween(
         position.latitude,
         position.longitude,
@@ -3236,8 +3485,9 @@ class _MapViewState extends State<MapView> {
       );
       return candidateDistance < closestDistance ? candidate : closest;
     });
-    setState(() => _nearestStation = station);
+    setState(() => _nearestTransitStop = stop);
   }
+
 
   void _trackAnonymousStationPresence(Position position) {
     if (!_stationLocationTrackingEnabled ||
@@ -3327,22 +3577,51 @@ class _MapViewState extends State<MapView> {
       _showMessage('Incident reporting is not configured yet.');
       return;
     }
+    final auth = Supabase.instance.client.auth;
+    if (auth.currentUser == null) {
+      _showMessage('Sign in to submit an incident report.');
+      return;
+    }
+    if (auth.currentSession == null) {
+      try {
+        await auth.refreshSession();
+      } on AuthException {
+        // Safe recovery
+      }
+    }
+    if (auth.currentSession == null) {
+      _showMessage('Your sign-in session has expired. Please sign in again.');
+      return;
+    }
+    if (_lastKnownPosition == null) await _startLocationTracking();
     if (!mounted) return;
-    final stop =
-        _transitStopsById[_temporaryIncidentReportStopId] ??
-        _transitStopsById.values.firstWhere(
-          (candidate) => candidate.id.split(':').last == 'KJ15',
-          orElse: () => const TransitStop(
-            id: _temporaryIncidentReportStopId,
-            name: 'KL SENTRAL - REDONE',
-            lat: 3.13442,
-            lon: 101.68625,
-            transitType: 'rail',
-            routes: 'Kelana Jaya Line',
-          ),
-        );
-    if (stop.transitType != 'rail') {
-      _showMessage('KL Sentral LRT station is not available for reporting.');
+    final position = _lastKnownPosition;
+    if (position == null) {
+      _showMessage('Your location is needed to report an incident.');
+      return;
+    }
+    if (_transitStopsById.isEmpty) {
+      _showMessage('Nearby transit data is still loading. Please try again.');
+      return;
+    }
+
+    _updateNearestTransitStop(position);
+    final stop = _nearestTransitStop;
+    if (stop == null) {
+      _showMessage('No nearby transit stations or stops found.');
+      return;
+    }
+
+    final distance = Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      stop.lat,
+      stop.lon,
+    );
+    if (distance > 100) {
+      _showMessage(
+        'You need to be within 100 m of a station or stop to report an incident.',
+      );
       return;
     }
 
@@ -3364,7 +3643,8 @@ class _MapViewState extends State<MapView> {
     }
     if (!mounted) return;
 
-    final report = await showModalBottomSheet<IncidentType>(
+    final submission =
+        await showModalBottomSheet<IncidentReportSubmission>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => IncidentTypeSelectionSheet(
@@ -3373,7 +3653,9 @@ class _MapViewState extends State<MapView> {
         affectedRoute: affectedRoute,
       ),
     );
-    if (report == null) return;
+    if (submission == null) return;
+    final report = submission.type;
+    final comment = submission.comment;
 
     final reportKey = '${stop.id}:${affectedRoute ?? 'station'}:${report.name}';
     if (_submittedIncidentKeys.contains(reportKey)) {
@@ -3390,6 +3672,7 @@ class _MapViewState extends State<MapView> {
           'station_lat': stop.lat,
           'station_lon': stop.lon,
           'report_type': report.name,
+          if (comment != null && comment.isNotEmpty) 'comment': comment,
           'target_type': isBusStop ? 'bus' : 'station',
           'service_route': affectedRoute,
           'reported_at': DateTime.now().toUtc().toIso8601String(),
@@ -3491,13 +3774,22 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  Future<void> _focusNearestStation() async {
-    final station = _nearestStation;
-    if (station == null) return;
+  Future<void> _focusNearestTransitStop() async {
+    final stop = _nearestTransitStop;
+    if (stop == null) return;
     await _mapController?.animateCamera(
-      CameraUpdate.newLatLngZoom(LatLng(station.lat, station.lon), 15),
+      CameraUpdate.newLatLngZoom(LatLng(stop.lat, stop.lon), 16),
+    );
+    if (!mounted) return;
+    _showStopDetails(
+      stopId: stop.id,
+      stopName: stop.name,
+      routes: stop.routes,
+      transitType: stop.transitType,
+      stop: stop,
     );
   }
+
 
   Future<void> _showMyLocation() async {
     final controller = _mapController;
@@ -3612,6 +3904,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _queryTappedFeature(dynamic point) async {
+    if (_currentItinerary != null || _isCardExpanded) return;
     final features = await _mapController?.queryRenderedFeatures(point, [
       'rail_stop_hit_targets_layer',
       'bus_stop_hit_targets_layer',
@@ -3821,11 +4114,6 @@ class _MapViewState extends State<MapView> {
       final stopFeatures = (geoJson['features'] as List<dynamic>? ?? const [])
           .whereType<Map>()
           .toList();
-      final stations = stopFeatures
-          .whereType<Map>()
-          .map((feature) => TransitStation.fromGeoJson(feature))
-          .whereType<TransitStation>()
-          .toList();
       final stops = stopFeatures
           .map((feature) => TransitStop.fromGeoJson(feature))
           .whereType<TransitStop>()
@@ -3835,11 +4123,10 @@ class _MapViewState extends State<MapView> {
       };
       if (mounted) {
         setState(() {
-          _railStations = stations;
           _transitStopsById = stopsById;
         });
         final position = _lastKnownPosition;
-        if (position != null) _updateNearestStation(position);
+        if (position != null) _updateNearestTransitStop(position);
       }
 
       // Prefer the current FastAPI catalogue; bundled stops keep the map useful
@@ -4043,6 +4330,109 @@ class _MapViewState extends State<MapView> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _openGrab({ItineraryLeg? leg}) async {
+    double? pickupLat = leg?.fromPlace?.lat;
+    double? pickupLon = leg?.fromPlace?.lon;
+    String? pickupName = leg?.fromPlace?.name;
+
+    double? dropoffLat = leg?.toPlace?.lat;
+    double? dropoffLon = leg?.toPlace?.lon;
+    String? dropoffName = leg?.toPlace?.name;
+
+    if (pickupLat == null && _lastKnownPosition != null) {
+      pickupLat = _lastKnownPosition!.latitude;
+      pickupLon = _lastKnownPosition!.longitude;
+      pickupName ??= 'Current Location';
+    }
+    if (dropoffLat == null && _selectedPlace != null) {
+      dropoffLat = _selectedPlace!.lat;
+      dropoffLon = _selectedPlace!.lon;
+      dropoffName ??= _selectedPlace!.name;
+    }
+
+    final queryParams = <String, String>{
+      'screenType': 'RIDES',
+      if (dropoffLat != null) 'dropoff_lat': dropoffLat.toString(),
+      if (dropoffLon != null) 'dropoff_lng': dropoffLon.toString(),
+      if (dropoffLat != null) 'destination_lat': dropoffLat.toString(),
+      if (dropoffLon != null) 'destination_lng': dropoffLon.toString(),
+      if (dropoffName != null && dropoffName.isNotEmpty) ...{
+        'dropoff_name': dropoffName,
+        'destination_name': dropoffName,
+        'dropoff[address]': dropoffName,
+      },
+      if (pickupLat != null) 'pickup_lat': pickupLat.toString(),
+      if (pickupLon != null) 'pickup_lng': pickupLon.toString(),
+      if (pickupName != null && pickupName.isNotEmpty) ...{
+        'pickup_name': pickupName,
+        'pickup[address]': pickupName,
+      },
+    };
+
+    final appUri = Uri(
+      scheme: 'grab',
+      host: 'open',
+      queryParameters: queryParams.isNotEmpty ? queryParams : null,
+    );
+    final webUri = Uri.parse('https://r.grab.com/open').replace(
+      queryParameters: queryParams.isNotEmpty ? queryParams : null,
+    );
+    final isIos = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final storeUri = Uri.parse(
+      isIos
+          ? 'https://apps.apple.com/app/grab-taxi-ride-food-delivery/id647268330'
+          : 'https://play.google.com/store/apps/details?id=com.grabtaxi.passenger',
+    );
+
+    try {
+      // 1. Attempt to launch native Grab app
+      final opened = await launchUrl(
+        appUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (opened) return;
+
+      // 2. Attempt universal link fallback
+      final webOpened = await launchUrl(
+        webUri,
+        mode: LaunchMode.externalApplication,
+        webOnlyWindowName: kIsWeb ? '_blank' : null,
+      );
+      if (webOpened) return;
+
+      // 3. Fallback to app store / web transport page
+      if (kIsWeb) {
+        await launchUrl(
+          Uri.parse('https://www.grab.com/my/transport/'),
+          mode: LaunchMode.externalApplication,
+          webOnlyWindowName: '_blank',
+        );
+      } else {
+        await launchUrl(
+          storeUri,
+          mode: LaunchMode.externalApplication,
+        );
+      }
+    } catch (_) {
+      try {
+        if (kIsWeb) {
+          await launchUrl(
+            Uri.parse('https://www.grab.com/my/transport/'),
+            mode: LaunchMode.externalApplication,
+            webOnlyWindowName: '_blank',
+          );
+        } else {
+          await launchUrl(
+            storeUri,
+            mode: LaunchMode.externalApplication,
+          );
+        }
+      } catch (_) {
+        _showMessage('Could not open Grab.');
+      }
+    }
+  }
+
   Future<void> _openEhailingStore() async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     await showModalBottomSheet(
@@ -4101,37 +4491,10 @@ class _MapViewState extends State<MapView> {
                   ),
                   onTap: () async {
                     Navigator.of(modalContext).pop();
-                    final appUri = Uri.parse('grab://open');
-                    final webUri = Uri.parse('https://r.grab.com/open');
-                    final storeUri = Uri.parse(
-                      isIos
-                          ? 'https://apps.apple.com/app/grab-taxi-ride-food-delivery/id647268330'
-                          : 'https://play.google.com/store/apps/details?id=com.grabtaxi.passenger',
-                    );
-                    try {
-                      if (!await launchUrl(
-                        appUri,
-                        mode: LaunchMode.externalApplication,
-                      )) {
-                        if (!await launchUrl(
-                          webUri,
-                          mode: LaunchMode.externalApplication,
-                          webOnlyWindowName: kIsWeb ? '_self' : null,
-                        )) {
-                          await launchUrl(
-                            storeUri,
-                            mode: LaunchMode.externalApplication,
-                            webOnlyWindowName: kIsWeb ? '_self' : null,
-                          );
-                        }
-                      }
-                    } catch (_) {
-                      await launchUrl(
-                        storeUri,
-                        mode: LaunchMode.externalApplication,
-                        webOnlyWindowName: kIsWeb ? '_self' : null,
-                      );
-                    }
+                    final hailLeg = _currentItinerary?.legs
+                        .where((l) => l.mode == 'HAIL')
+                        .firstOrNull;
+                    await _openGrab(leg: hailLeg);
                   },
                 ),
                 const SizedBox(height: 8),
@@ -4224,30 +4587,122 @@ class _MapViewState extends State<MapView> {
 
 
   Widget _buildNearestStationCard() {
-    final station = _nearestStation;
+    final stop = _nearestTransitStop;
     final position = _lastKnownPosition;
-    final distance = station == null || position == null
+    final hasLocation = position != null;
+    final hasStops = _transitStopsById.isNotEmpty;
+
+    final distance = stop == null || position == null
         ? null
         : Geolocator.distanceBetween(
             position.latitude,
             position.longitude,
-            station.lat,
-            station.lon,
+            stop.lat,
+            stop.lon,
           );
     final distanceLabel = distance == null
-        ? 'Finding the closest rail station…'
+        ? null
         : distance < 1000
         ? '${distance.round()} m away'
         : '${(distance / 1000).toStringAsFixed(1)} km away';
-    final crowdFuture = station == null ? null : _fetchStationCrowd(station.id);
+
+    final isBus = stop?.transitType == 'bus';
+    final cardTitle = stop == null
+        ? 'Nearest transit point'
+        : isBus
+        ? 'Nearest bus stop'
+        : 'Nearest station';
+
+    final crowdFuture =
+        (stop == null || isBus) ? null : _fetchStationCrowd(stop.id);
 
     final colorScheme = Theme.of(context).colorScheme;
     final isCompact = MediaQuery.sizeOf(context).width < 400;
 
+    final IconData leadingIcon;
+    final Widget subtitleWidget;
+    final Widget? trailingWidget;
+    final VoidCallback? onTapAction;
+
+    if (!hasLocation) {
+      leadingIcon = Icons.location_off_outlined;
+      subtitleWidget = Text(
+        'Location unavailable • Tap to enable',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+      );
+      trailingWidget = TextButton(
+        onPressed: _startLocationTracking,
+        child: const Text('Enable'),
+      );
+      onTapAction = _startLocationTracking;
+    } else if (!hasStops) {
+      leadingIcon = Icons.near_me_outlined;
+      subtitleWidget = Text(
+        'Loading nearby transit data…',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+      );
+      trailingWidget = const SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+      onTapAction = null;
+    } else if (stop == null) {
+      leadingIcon = Icons.location_searching;
+      subtitleWidget = Text(
+        'No nearby stations or stops found',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+      );
+      trailingWidget = null;
+      onTapAction = null;
+    } else {
+      leadingIcon = isBus ? Icons.directions_bus : Icons.train;
+      onTapAction = _focusNearestTransitStop;
+      trailingWidget = distanceLabel != null
+          ? TextButton(
+              onPressed: _focusNearestTransitStop,
+              child: Text(distanceLabel),
+            )
+          : null;
+
+      if (isBus) {
+        final serviceInfo = stop.routes.isNotEmpty
+            ? 'Routes: ${stop.routes}'
+            : 'Bus service';
+        subtitleWidget = Text(
+          '${stop.name} • $serviceInfo',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+        );
+      } else {
+        subtitleWidget = FutureBuilder<StationCrowd>(
+          future: crowdFuture,
+          builder: (context, snapshot) {
+            final crowd = snapshot.data;
+            final info = crowd?.label ??
+                (stop.routes.isNotEmpty ? stop.routes : 'Low crowd level');
+            return Text(
+              '${stop.name} • $info',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+            );
+          },
+        );
+      }
+    }
+
     return Material(
       color: colorScheme.surfaceContainerLow,
       child: InkWell(
-        onTap: station == null ? null : _focusNearestStation,
+        onTap: onTapAction,
         child: Padding(
           padding: EdgeInsets.all(isCompact ? 8 : 10),
           child: Row(
@@ -4256,7 +4711,7 @@ class _MapViewState extends State<MapView> {
                 radius: isCompact ? 18 : 20,
                 backgroundColor: colorScheme.secondaryContainer,
                 foregroundColor: colorScheme.onSecondaryContainer,
-                child: Icon(Icons.train, size: isCompact ? 20 : 24),
+                child: Icon(leadingIcon, size: isCompact ? 20 : 24),
               ),
               SizedBox(width: isCompact ? 8 : 12),
               Expanded(
@@ -4265,42 +4720,19 @@ class _MapViewState extends State<MapView> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'Nearest station',
+                      cardTitle,
                       style: isCompact
                           ? Theme.of(context).textTheme.titleSmall
                           : Theme.of(context).textTheme.titleMedium,
                     ),
-                    station == null
-                        ? Text(distanceLabel)
-                        : FutureBuilder<StationCrowd>(
-                            future: crowdFuture,
-                            builder: (context, snapshot) {
-                              final crowd = snapshot.data;
-                              return Text(
-                                '${station.name} • ${crowd?.label ?? 'Low crowd level'}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: isCompact
-                                    ? Theme.of(context).textTheme.bodySmall
-                                    : null,
-                              );
-                            },
-                          ),
+                    subtitleWidget,
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              if (station == null)
-                const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                TextButton(
-                  onPressed: _focusNearestStation,
-                  child: Text(distanceLabel),
-                ),
+              if (trailingWidget != null) ...[
+                const SizedBox(width: 8),
+                trailingWidget,
+              ],
             ],
           ),
         ),
@@ -4476,9 +4908,18 @@ class _MapViewState extends State<MapView> {
                   padding: const EdgeInsets.only(left: 12, top: 10, bottom: 10),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: Colors.black26),
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.outlineVariant,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.08),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -4486,15 +4927,22 @@ class _MapViewState extends State<MapView> {
                         child: DropdownButton<String>(
                           value: _currentRegion,
                           isExpanded: true,
-                          icon: const Icon(
+                          dropdownColor:
+                              Theme.of(context).colorScheme.surface,
+                          icon: Icon(
                             Icons.expand_more,
-                            color: Colors.black,
+                            color: Theme.of(context).colorScheme.onSurface,
                           ),
-                          items: const [
+                          items: [
                             DropdownMenuItem(
                               value: _currentRegion,
                               child: Text(
                                 _currentRegion,
+                                style: TextStyle(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurface,
+                                ),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -4511,9 +4959,18 @@ class _MapViewState extends State<MapView> {
                   padding: const EdgeInsets.only(top: 10, bottom: 10),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: Colors.black26),
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.outlineVariant,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.08),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                     child: TextField(
                       key: const ValueKey('place-search-field'),
@@ -4522,17 +4979,58 @@ class _MapViewState extends State<MapView> {
                       textInputAction: TextInputAction.search,
                       onSubmitted: (_) => _searchPlaces(),
                       onChanged: _onPlaceSearchChanged,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         hintText: 'Search for a location',
-                        prefixIcon: Icon(Icons.search, color: Colors.black),
+                        hintStyle: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                        prefixIcon: Icon(
+                          Icons.search,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
                         border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(vertical: 12),
+                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                     ),
                   ),
                 )
               : Text(isMapTab ? 'JomNaik' : 'Profile'),
-          actions: const [],
+          actions: [
+            if (isMapTab) ...[
+              IconButton(
+                tooltip: _isSatelliteMode
+                    ? 'Switch to standard map'
+                    : 'Switch to satellite imagery',
+                icon: Icon(
+                  _isSatelliteMode
+                      ? Icons.map_outlined
+                      : Icons.satellite_alt_outlined,
+                ),
+                onPressed: _toggleSatellite,
+              ),
+              ValueListenableBuilder<ThemeMode>(
+                valueListenable: themeModeNotifier,
+                builder: (context, mode, _) {
+                  final isDark = mode == ThemeMode.dark ||
+                      (mode == ThemeMode.system &&
+                          MediaQuery.platformBrightnessOf(context) ==
+                              Brightness.dark);
+                  return IconButton(
+                    tooltip: isDark
+                        ? 'Switch to light mode'
+                        : 'Switch to dark mode',
+                    icon: Icon(
+                      isDark
+                          ? Icons.light_mode_outlined
+                          : Icons.dark_mode_outlined,
+                    ),
+                    onPressed: _toggleTheme,
+                  );
+                },
+              ),
+              const SizedBox(width: 4),
+            ],
+          ],
           backgroundColor: isMapTab ? Colors.transparent : null,
           surfaceTintColor: Colors.transparent,
           elevation: 0,
@@ -4546,33 +5044,50 @@ class _MapViewState extends State<MapView> {
                 : Stack(
                     children: [
                       MapLibreMap(
-                          initialCameraPosition: const CameraPosition(
-                            target: LatLng(3.1390, 101.6868),
-                            zoom: 12,
-                          ),
+                        key: ValueKey('map_style_$_mapStyleVersion'),
+                        initialCameraPosition: const CameraPosition(
+                          target: LatLng(3.1390, 101.6868),
+                          zoom: 12,
+                        ),
                         // Weather is keyed to the visible map centre.
-                          trackCameraPosition: true,
-                        scrollGesturesEnabled: !_isScrollingCard,
-                        zoomGesturesEnabled: !_isScrollingCard,
-                        rotateGesturesEnabled: !_isScrollingCard,
-                        tiltGesturesEnabled: !_isScrollingCard,
-                        doubleClickZoomEnabled: !_isScrollingCard,
-                          onMapCreated: _onMapCreated,
+                        trackCameraPosition: true,
+                        scrollGesturesEnabled:
+                            !_isScrollingCard && !_isCardExpanded,
+                        zoomGesturesEnabled:
+                            !_isScrollingCard && !_isCardExpanded,
+                        rotateGesturesEnabled:
+                            !_isScrollingCard && !_isCardExpanded,
+                        tiltGesturesEnabled:
+                            !_isScrollingCard && !_isCardExpanded,
+                        doubleClickZoomEnabled:
+                            !_isScrollingCard && !_isCardExpanded,
+                        onMapCreated: _onMapCreated,
                         onMapClick: (point, coordinate) =>
-                                    _handleMapStartPick(point, coordinate),
-                          featureTapsTriggersMapClick: false,
+                            _handleMapStartPick(point, coordinate),
+                        featureTapsTriggersMapClick: false,
                         onMapLongClick: (_, coordinate) =>
-                                    _showLongPressedLocation(coordinate),
-                          onCameraMove: _onCameraMove,
-                          onCameraIdle: _onCameraIdle,
-                          styleString: _dynamicStyleString!,
-                          compassEnabled: false,
-                          compassViewPosition: kIsWeb
-                              ? CompassViewPosition.topRight
-                              : CompassViewPosition.bottomRight,
-                          compassViewMargins: kIsWeb
-                              ? null
-                              : const Point(16, 160),
+                            _showLongPressedLocation(coordinate),
+                        onCameraMove: _onCameraMove,
+                        onCameraIdle: _onCameraIdle,
+                        styleString: _dynamicStyleString!,
+                        compassEnabled: false,
+                        compassViewPosition: kIsWeb
+                            ? CompassViewPosition.topRight
+                            : CompassViewPosition.bottomRight,
+                        compassViewMargins: kIsWeb
+                            ? null
+                            : const Point(16, 160),
+                      ),
+                      if (_isCardExpanded)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () {},
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              color: Colors.black.withValues(alpha: 0.54),
+                            ),
+                          ),
                         ),
                       if (_currentItinerary == null)
                         Positioned(
@@ -4631,8 +5146,14 @@ class _MapViewState extends State<MapView> {
                           guidanceCard: _buildJourneyGuidanceCard(),
                           onDismiss: _dismissItinerary,
                           onFindApps: _openEhailingStore,
+                          onOpenGrab: (leg) => _openGrab(leg: leg),
                           onUserInteracted: _markItineraryUserInteracted,
                           onCardInteractionChanged: _setScrollingCard,
+                          onExpandedChanged: (expanded) {
+                            if (_isCardExpanded != expanded) {
+                              setState(() => _isCardExpanded = expanded);
+                            }
+                          },
                         ),
                     ],
                   ),
@@ -4666,34 +5187,18 @@ class _MapViewState extends State<MapView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  IconButton.filledTonal(
-                    onPressed: _showNorth,
+                  FloatingActionButton.small(
+                    heroTag: 'show-north',
+                    onPressed: _mapController == null ? null : _showNorth,
                     tooltip: 'Show north',
-                    iconSize: 20,
-                    style: IconButton.styleFrom(
-                      minimumSize: const Size(48, 48),
-                      backgroundColor: const Color(0xFFD8B4FE),
-                      foregroundColor: Colors.black,
-                      padding: EdgeInsets.zero,
-                      elevation: 6,
-                      shadowColor: Colors.black45,
-                    ),
-                    icon: const Icon(Icons.navigation),
+                    child: const Icon(Icons.navigation),
                   ),
                   const SizedBox(height: 8),
-                  IconButton.filledTonal(
+                  FloatingActionButton.small(
+                    heroTag: 'show-location',
                     onPressed: _showMyLocation,
                     tooltip: 'Show my location',
-                    iconSize: 20,
-                    style: IconButton.styleFrom(
-                      minimumSize: const Size(48, 48),
-                      backgroundColor: const Color(0xFFD8B4FE),
-                      foregroundColor: Colors.black,
-                      padding: EdgeInsets.zero,
-                      elevation: 6,
-                      shadowColor: Colors.black45,
-                    ),
-                    icon: const Icon(Icons.my_location),
+                    child: const Icon(Icons.my_location),
                   ),
                 ],
               )

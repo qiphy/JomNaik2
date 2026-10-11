@@ -28,33 +28,36 @@ class RouteChoicesSheet extends StatelessWidget {
       case 'ehailing':
         return 'E-hailing';
       case 'hybrid':
-        return 'E-hailing + transit';
+        return 'Hybrid';
+      case 'walking':
+        return 'Walking';
     }
     final modes = _itineraryLegs(itinerary)
         .map((leg) => leg['mode']?.toString().toUpperCase())
         .toSet();
+    final hasTransit = modes.any((mode) => {'RAIL', 'SUBWAY', 'TRAM', 'BUS'}.contains(mode));
+    if (modes.contains('HAIL') && hasTransit) return 'Hybrid';
     if (modes.contains('HAIL')) return 'E-hailing';
     final hasBus = modes.contains('BUS');
     final hasRail = modes.any(
       (mode) => mode == 'RAIL' || mode == 'SUBWAY' || mode == 'TRAM',
     );
-    if (hasBus && hasRail) return 'Bus & rail';
-    if (hasRail) return 'Rail';
-    if (hasBus) return 'Bus';
+    if (hasBus && hasRail) return 'Mostly rail';
+    if (hasRail) return 'Mostly rail';
+    if (hasBus) return 'Mostly bus';
     return 'Walking';
   }
 
   IconData _routeOptionIcon(Map<String, dynamic> itinerary) {
     switch (_routeOptionTitle(itinerary)) {
       case 'E-hailing':
-      case 'E-hailing + transit':
         return Icons.local_taxi;
-      case 'Bus':
+      case 'Hybrid':
+        return Icons.alt_route;
+      case 'Mostly bus':
         return Icons.directions_bus;
-      case 'Rail':
+      case 'Mostly rail':
         return Icons.train;
-      case 'Bus & rail':
-        return Icons.directions_transit;
       default:
         return Icons.directions_walk;
     }
@@ -86,71 +89,180 @@ class RouteChoicesSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.82;
+    final hasTransit = itineraries.any((it) {
+      final rawLegs = it['legs'];
+      if (rawLegs is! List) return false;
+      return rawLegs.any((leg) {
+        if (leg is! Map) return false;
+        final mode = leg['mode']?.toString().toUpperCase();
+        return mode != null && mode != 'WALK' && mode != 'HAIL';
+      });
+    });
+
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Choose a route',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Close',
-                  icon: const Icon(Icons.close),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ...itineraries.map((itinerary) {
-              final option = Itinerary.fromJson(itinerary);
-              return Card(
-                child: ListTile(
-                  leading: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(_routeOptionIcon(itinerary)),
-                      if (option.legs.any(
-                        (leg) => leg.incidentReports.isNotEmpty,
-                      )) ...[
-                        const SizedBox(width: 4),
-                        const Icon(
-                          Icons.warning_amber_rounded,
-                          color: Colors.orange,
-                          size: 20,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Choose a route',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          '${itineraries.length} options available',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
                         ),
                       ],
-                    ],
+                    ),
                   ),
-                  title: Text(_routeOptionTitle(itinerary)),
-                  subtitle: Text(_routeOptionSummary(itinerary)),
-                  trailing: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                  IconButton(
+                    tooltip: 'Close',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (!hasTransit)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.tertiaryContainer.withValues(
+                      alpha: 0.5,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: theme.colorScheme.tertiary.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Row(
                     children: [
-                      Text(formatDuration(option.duration)),
-                      if (fareLabel(option).isNotEmpty)
-                        Text(
-                          fareLabel(option),
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+                      Icon(
+                        Icons.schedule,
+                        color: theme.colorScheme.tertiary,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Public transit is not running at this departure time. Showing available alternatives like e-hailing and walking.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onTertiaryContainer,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
+                      ),
                     ],
                   ),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    onSelectItinerary(itinerary);
+                ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: itineraries.length,
+                  itemBuilder: (context, index) {
+                    final itinerary = itineraries[index];
+                    final option = Itinerary.fromJson(itinerary);
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      elevation: 1,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        side: BorderSide(
+                          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 6,
+                        ),
+                        leading: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.primaryContainer.withValues(alpha: 0.6),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            _routeOptionIcon(itinerary),
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                        title: Row(
+                          children: [
+                            Text(
+                              _routeOptionTitle(itinerary),
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            if (option.legs.any(
+                              (leg) => leg.incidentReports.isNotEmpty,
+                            )) ...[
+                              const SizedBox(width: 6),
+                              Tooltip(
+                                message: 'Service alerts reported',
+                                child: Icon(
+                                  Icons.warning_amber_rounded,
+                                  color: Colors.amber.shade800,
+                                  size: 18,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(_routeOptionSummary(itinerary)),
+                        ),
+                        trailing: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              formatDuration(option.duration),
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            if (fareLabel(option).isNotEmpty)
+                              Text(
+                                fareLabel(option),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: theme.colorScheme.primary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                          ],
+                        ),
+                        onTap: () {
+                          Navigator.of(context).pop();
+                          onSelectItinerary(itinerary);
+                        },
+                      ),
+                    );
                   },
                 ),
-              );
-            }),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );

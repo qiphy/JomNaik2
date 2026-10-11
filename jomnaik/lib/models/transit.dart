@@ -258,6 +258,12 @@ enum IncidentType {
     Icons.build_circle_outlined,
     true,
   ),
+  busReroute(
+    'Bus rerouted or detour',
+    'The bus has changed its route or taken an unexpected detour.',
+    Icons.alt_route,
+    true,
+  ),
   busSafety(
     'Bus safety or accessibility issue',
     'Report a safety concern or accessibility obstruction.',

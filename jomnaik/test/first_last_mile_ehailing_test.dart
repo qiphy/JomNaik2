@@ -26,7 +26,7 @@ void main() {
         fromLon: 101.71834,
         toLat: 3.0733,
         toLon: 101.6078,
-        departure: DateTime.now(),
+        departure: DateTime(2026, 10, 12, 12, 0),
       );
 
       expect(result, isNotNull);
@@ -74,7 +74,7 @@ void main() {
         fromLon: 101.6078,
         toLat: 3.158935,
         toLon: 101.713287,
-        departure: DateTime.now(),
+        departure: DateTime(2026, 10, 12, 12, 0),
       );
 
       if (result != null) {

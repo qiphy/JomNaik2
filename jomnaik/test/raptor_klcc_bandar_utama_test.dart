@@ -39,7 +39,7 @@ void main() {
           fromLon: orig.$3,
           toLat: dest.$2,
           toLon: dest.$3,
-          departure: DateTime.now(),
+          departure: DateTime(2026, 10, 12, 12, 0),
         );
 
         if (result == null) {

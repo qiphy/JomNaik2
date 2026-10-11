@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
 import '../offline_raptor_router.dart';
+import '../models/itinerary.dart';
 import '../backend_client.dart';
 
 class RoutingService {
@@ -39,9 +40,10 @@ class RoutingService {
     String? fromStopId,
     String? toStopId,
     bool preferBrt = false,
+    DateTime? departure,
     required void Function(String) onMessage,
   }) async {
-    final departure = DateTime.now();
+    final when = departure ?? DateTime.now();
 
     Map<String, dynamic>? transitRoute;
     bool usedOfflineTransit = false;
@@ -59,7 +61,7 @@ class RoutingService {
         fromStopId: fromStopId,
         toStopId: toStopId,
         preferBrt: preferBrt,
-        departure: departure,
+        departure: when,
       );
 
       if (transitRoute != null) {
@@ -75,22 +77,40 @@ class RoutingService {
       debugPrint('Online transit routing error: $error');
     }
 
+    final validOnlineTransit = <Map<String, dynamic>>[];
+    if (transitRoute != null) {
+      final transitItineraries = _extractItineraries(transitRoute);
+      for (final itinerary in transitItineraries) {
+        if (itinerary is Map) {
+          final normalized = Map<String, dynamic>.from(itinerary);
+          normalized.putIfAbsent('routeCategory', () => 'transit');
+          normalized.putIfAbsent('routingSource', () => 'backend');
+          if (isItineraryMapAvailableAtDeparture(normalized, when)) {
+            validOnlineTransit.add(normalized);
+          }
+        }
+      }
+    }
+
     // ------------------------------------------------------------
-    // 2. If online transit failed, try offline RAPTOR
+    // 2. If online transit failed or returned no journeys available
+    // at the departure time, try offline RAPTOR
     // ------------------------------------------------------------
 
-    if (transitRoute == null) {
+    Map<String, dynamic>? offlineTransitRoute;
+    if (validOnlineTransit.isEmpty) {
       try {
-        transitRoute = await _getOfflineTransitRoute(
+        offlineTransitRoute = await _getOfflineTransitRoute(
           fromLat: fromLat,
           fromLon: fromLon,
           toLat: toLat,
           toLon: toLon,
           fromStopId: fromStopId,
           toStopId: toStopId,
+          departure: when,
         );
 
-        if (transitRoute != null) {
+        if (offlineTransitRoute != null) {
           usedOfflineTransit = true;
           debugPrint('Offline RAPTOR routing succeeded.');
         }
@@ -110,7 +130,7 @@ class RoutingService {
       fromLon: fromLon,
       toLat: toLat,
       toLon: toLon,
-      departure: departure,
+      departure: when,
     );
 
     // ------------------------------------------------------------
@@ -119,24 +139,18 @@ class RoutingService {
 
     final combinedItineraries = <Map<String, dynamic>>[];
 
-    if (transitRoute != null) {
-      final transitItineraries = _extractItineraries(transitRoute);
-
-      for (final itinerary in transitItineraries) {
+    if (validOnlineTransit.isNotEmpty) {
+      combinedItineraries.addAll(validOnlineTransit);
+    } else if (offlineTransitRoute != null) {
+      final offlineItineraries = _extractItineraries(offlineTransitRoute);
+      for (final itinerary in offlineItineraries) {
         if (itinerary is Map) {
           final normalized = Map<String, dynamic>.from(itinerary);
-
-          normalized.putIfAbsent(
-            'routeCategory',
-            () => 'transit',
-          );
-
-          normalized.putIfAbsent(
-            'routingSource',
-            () => usedOfflineTransit ? 'offline_raptor' : 'backend',
-          );
-
-          combinedItineraries.add(normalized);
+          normalized.putIfAbsent('routeCategory', () => 'transit');
+          normalized.putIfAbsent('routingSource', () => 'offline_raptor');
+          if (isItineraryMapAvailableAtDeparture(normalized, when)) {
+            combinedItineraries.add(normalized);
+          }
         }
       }
     }
@@ -174,7 +188,7 @@ class RoutingService {
 
     if (!hasTransit) {
       onMessage(
-        'No public transport route found. Showing alternative travel options.',
+        'Public transit is not operating at the requested departure time. Showing available alternatives like e-hailing and walking.',
       );
     } else if (hasEhailing || hasWalking) {
       onMessage(
@@ -186,6 +200,7 @@ class RoutingService {
       'itineraries': ranked,
       'offlineRouting': usedOfflineTransit,
       'multimodal': true,
+      'transitAvailable': hasTransit,
       'availableModes': {
         'transit': hasTransit,
         'walk': hasWalking,
@@ -282,7 +297,9 @@ class RoutingService {
     required double toLon,
     String? fromStopId,
     String? toStopId,
+    DateTime? departure,
   }) async {
+    final when = departure ?? DateTime.now();
     try {
       final result = await offlineRouter.plan(
         fromLat: fromLat,
@@ -291,6 +308,7 @@ class RoutingService {
         toLon: toLon,
         fromStopId: fromStopId,
         toStopId: toStopId,
+        departure: when,
       );
 
       if (result == null || result['itineraries'] is! List) {
@@ -322,6 +340,10 @@ class RoutingService {
             'Ignoring offline transit itinerary with duration '
             '${(duration / 3600).toStringAsFixed(1)} hours.',
           );
+          continue;
+        }
+
+        if (!isItineraryMapAvailableAtDeparture(itinerary, when)) {
           continue;
         }
 

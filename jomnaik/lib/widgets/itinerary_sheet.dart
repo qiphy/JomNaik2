@@ -3,17 +3,19 @@ import 'package:flutter/material.dart';
 import '../models/itinerary.dart';
 import '../utils/formatters.dart';
 
-class ItinerarySheet extends StatelessWidget {
+class ItinerarySheet extends StatefulWidget {
   const ItinerarySheet({
     super.key,
     required this.itinerary,
-    this.initialExtent = 0.25,
+    this.initialExtent = 0.40,
     this.weatherReminder,
     required this.guidanceCard,
     required this.onDismiss,
     required this.onFindApps,
+    this.onOpenGrab,
     this.onUserInteracted,
     this.onCardInteractionChanged,
+    this.onExpandedChanged,
   });
 
   final Itinerary itinerary;
@@ -22,20 +24,72 @@ class ItinerarySheet extends StatelessWidget {
   final Widget guidanceCard;
   final VoidCallback onDismiss;
   final VoidCallback onFindApps;
+  final void Function(ItineraryLeg leg)? onOpenGrab;
   final VoidCallback? onUserInteracted;
   final ValueChanged<bool>? onCardInteractionChanged;
+  final ValueChanged<bool>? onExpandedChanged;
+
+  @override
+  State<ItinerarySheet> createState() => _ItinerarySheetState();
+}
+
+class _ItinerarySheetState extends State<ItinerarySheet> {
+  late final DraggableScrollableController _sheetController;
+  static const double _minExtent = 0.10;
+  static const double _maxExtent = 0.95;
+
+  @override
+  void initState() {
+    super.initState();
+    _sheetController = DraggableScrollableController();
+  }
+
+  @override
+  void dispose() {
+    _sheetController.dispose();
+    super.dispose();
+  }
+
+  void _toggleExpand() {
+    if (!_sheetController.isAttached) return;
+    final current = _sheetController.size;
+    if (current < 0.25) {
+      _sheetController.animateTo(
+        widget.initialExtent,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    } else if (current < 0.70) {
+      _sheetController.animateTo(
+        _maxExtent,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _sheetController.animateTo(
+        _minExtent,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     return DraggableScrollableSheet(
-      initialChildSize: initialExtent,
-      minChildSize: 0.25,
-      maxChildSize: 1.0,
+      controller: _sheetController,
+      initialChildSize: widget.initialExtent,
+      minChildSize: _minExtent,
+      maxChildSize: _maxExtent,
       builder: (BuildContext context, ScrollController scrollController) {
         return NotificationListener<DraggableScrollableNotification>(
           onNotification: (notification) {
-            if ((notification.extent - initialExtent).abs() > 0.005) {
-              onUserInteracted?.call();
+            final isExpanded = notification.extent >= 0.65;
+            widget.onExpandedChanged?.call(isExpanded);
+            if ((notification.extent - widget.initialExtent).abs() > 0.005) {
+              widget.onUserInteracted?.call();
             }
             return false;
           },
@@ -43,42 +97,44 @@ class ItinerarySheet extends StatelessWidget {
             onNotification: (notification) {
               if (notification is ScrollStartNotification ||
                   notification is UserScrollNotification) {
-                onCardInteractionChanged?.call(true);
+                widget.onCardInteractionChanged?.call(true);
                 if (notification is ScrollStartNotification &&
                     notification.dragDetails != null) {
-                  onUserInteracted?.call();
+                  widget.onUserInteracted?.call();
                 }
               } else if (notification is ScrollEndNotification) {
-                onCardInteractionChanged?.call(false);
+                widget.onCardInteractionChanged?.call(false);
               }
               return false;
             },
             child: Listener(
               behavior: HitTestBehavior.translucent,
-              onPointerDown: (_) => onCardInteractionChanged?.call(true),
-              onPointerUp: (_) => onCardInteractionChanged?.call(false),
-              onPointerCancel: (_) => onCardInteractionChanged?.call(false),
+              onPointerDown: (_) => widget.onCardInteractionChanged?.call(true),
+              onPointerUp: (_) => widget.onCardInteractionChanged?.call(false),
+              onPointerCancel: (_) => widget.onCardInteractionChanged?.call(false),
               onPointerSignal: (event) {
                 if (event is PointerScrollEvent) {
-                  onCardInteractionChanged?.call(true);
+                  widget.onCardInteractionChanged?.call(true);
                 }
               },
               child: Container(
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                decoration: BoxDecoration(
+                  color: colorScheme.surface,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black12,
-                      blurRadius: 10,
+                      color: Colors.black.withValues(alpha: 0.12),
+                      blurRadius: 16,
                       spreadRadius: 2,
+                      offset: const Offset(0, -3),
                     ),
                   ],
                 ),
                 child: ListView.builder(
                   controller: scrollController,
                   padding: EdgeInsets.zero,
-                  itemCount: itinerary.legs.length + 1,
+                  physics: const ClampingScrollPhysics(),
+                  itemCount: widget.itinerary.legs.length + 1,
                   itemBuilder: (context, index) {
                     if (index == 0) {
                       return Padding(
@@ -86,23 +142,30 @@ class ItinerarySheet extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Center(
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: _toggleExpand,
                               child: Container(
-                                width: 40,
-                                height: 5,
-                                decoration: BoxDecoration(
-                                  color: Colors.grey[300],
-                                  borderRadius: BorderRadius.circular(10),
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                alignment: Alignment.center,
+                                child: Container(
+                                  width: 48,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: colorScheme.outlineVariant,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
                                 ),
                               ),
                             ),
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 4),
                             Row(
                               children: [
                                 Expanded(
                                   child: Text(
-                                    'Total Travel Time: ${formatDuration(itinerary.duration)}',
-                                    style: const TextStyle(
+                                    'Total Travel Time: ${formatDuration(widget.itinerary.duration)}',
+                                    style: theme.textTheme.titleMedium?.copyWith(
                                       fontSize: 18,
                                       fontWeight: FontWeight.bold,
                                     ),
@@ -111,52 +174,53 @@ class ItinerarySheet extends StatelessWidget {
                                 IconButton(
                                   tooltip: 'Close itinerary',
                                   icon: const Icon(Icons.close),
-                                  onPressed: onDismiss,
+                                  onPressed: widget.onDismiss,
                                 ),
                               ],
                             ),
-                            if (itinerary.fareAmount != null)
+                            if (widget.itinerary.fareAmount != null)
                               Padding(
                                 padding: const EdgeInsets.only(top: 4),
                                 child: Text(
-                                  '${itinerary.fareLabel ?? 'Estimated fare'}: ${fareLabel(itinerary)}',
-                                  style: const TextStyle(
+                                  '${widget.itinerary.fareLabel ?? 'Estimated fare'}: ${fareLabel(widget.itinerary)}',
+                                  style: TextStyle(
                                     fontWeight: FontWeight.w700,
+                                    color: colorScheme.primary,
                                   ),
                                 ),
                               ),
-                            if (weatherReminder != null) ...[
+                            if (widget.weatherReminder != null) ...[
                               const SizedBox(height: 8),
                               Container(
                                 width: double.infinity,
                                 padding: const EdgeInsets.all(10),
                                 decoration: BoxDecoration(
-                                  color: Colors.blue.shade50,
+                                  color: colorScheme.primaryContainer.withValues(alpha: 0.5),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Icon(
+                                    Icon(
                                       Icons.umbrella_outlined,
-                                      color: Colors.blue,
+                                      color: colorScheme.primary,
                                     ),
                                     const SizedBox(width: 8),
                                     Expanded(
-                                      child: Text(weatherReminder!),
+                                      child: Text(widget.weatherReminder!),
                                     ),
                                   ],
                                 ),
                               ),
                             ],
                             const SizedBox(height: 8),
-                            guidanceCard,
+                            widget.guidanceCard,
                           ],
                         ),
                       );
                     }
 
-                    final leg = itinerary.legs[index - 1];
+                    final leg = widget.itinerary.legs[index - 1];
                     final isWalk = leg.mode.toUpperCase() == 'WALK';
                     final isHail = leg.mode.toUpperCase() == 'HAIL';
 
@@ -221,7 +285,7 @@ class ItinerarySheet extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)} • ${fareLabel(itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(itinerary)} (RM1–RM3/km)',
+                                  '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)} • ${fareLabel(widget.itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(widget.itinerary)} (RM1–RM3/km)',
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
@@ -234,18 +298,43 @@ class ItinerarySheet extends StatelessWidget {
                               ],
                             ),
                           ),
-                          trailing: FilledButton.tonalIcon(
-                            onPressed: onFindApps,
-                            style: FilledButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 8,
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              FilledButton.icon(
+                                onPressed: () {
+                                  if (widget.onOpenGrab != null) {
+                                    widget.onOpenGrab!(leg);
+                                  } else {
+                                    widget.onFindApps();
+                                  }
+                                },
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFF00B14F),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 8,
+                                  ),
+                                ),
+                                icon: const Icon(Icons.local_taxi, size: 16),
+                                label: const Text('Grab'),
                               ),
-                            ),
-                            icon: const Icon(Icons.open_in_new, size: 16),
-                            label: const Text('Use E-hailing'),
+                              const SizedBox(width: 4),
+                              IconButton(
+                                icon: const Icon(Icons.more_vert, size: 20),
+                                tooltip: 'More e-hailing options',
+                                onPressed: widget.onFindApps,
+                              ),
+                            ],
                           ),
-                          onTap: onFindApps,
+                          onTap: () {
+                            if (widget.onOpenGrab != null) {
+                              widget.onOpenGrab!(leg);
+                            } else {
+                              widget.onFindApps();
+                            }
+                          },
                         ),
                       );
                     }

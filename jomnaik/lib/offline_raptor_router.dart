@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 
+import 'models/itinerary.dart';
 import 'offline_bundle_store.dart';
 
 /// Static, on-device public-transit fallback. It deliberately has no live
@@ -70,7 +71,10 @@ class OfflineRaptorRouter {
     final stops = Map<String, dynamic>.from(data['stops'] as Map);
     final when = departure ?? DateTime.now();
     final dayStart = DateTime(when.year, when.month, when.day);
-    final startSeconds = when.difference(dayStart).inSeconds;
+    var startSeconds = when.difference(dayStart).inSeconds;
+    if (startSeconds < 0) {
+      startSeconds = (startSeconds % 86400 + 86400) % 86400;
+    }
     // The bundled timetable has no verified pedestrian accessibility tags.
     // Slower estimates make constrained preferences favor less walking.
     final walkingSpeed = switch (walkingPreference) {
@@ -103,6 +107,28 @@ class OfflineRaptorRouter {
       return null;
     }
 
+    final activeTrips = <_Trip>[];
+    for (final trip in trips) {
+      if (_serviceActive(trip.serviceId, when, data)) {
+        activeTrips.add(trip);
+      }
+    }
+    // Account for overnight trips from yesterday's service calendar (trips running past 24:00)
+    // when departing in early morning hours (before 4:00 AM)
+    if (startSeconds < 14400) {
+      final yesterday = when.subtract(const Duration(days: 1));
+      for (final trip in trips) {
+        if (_serviceActive(trip.serviceId, yesterday, data)) {
+          final hasOvernight = trip.calls
+                  .any((c) => c.arrival >= 86400 || c.departure >= 86400) ||
+              trip.frequencies.any((f) => f.length >= 2 && f[1] >= 86400);
+          if (hasOvernight) {
+            activeTrips.add(_shiftTripByDay(trip, -86400));
+          }
+        }
+      }
+    }
+
     final labels = <String, _Label>{};
     for (final stop in origin) {
       labels[stop.id] = _Label(
@@ -117,8 +143,7 @@ class OfflineRaptorRouter {
     final candidates = <({_Label label, String destination})>[];
     for (var round = 0; round < 4; round++) {
       final next = Map<String, _Label>.from(labels);
-      for (final trip in trips) {
-        if (!_serviceActive(trip.serviceId, when, data)) continue;
+      for (final trip in activeTrips) {
         _scanTrip(trip, labels, next);
       }
       _applyTransfers(next, data);
@@ -176,6 +201,14 @@ class OfflineRaptorRouter {
         (route['itineraries'] as List).whereType<Map<String, dynamic>>(),
       );
     }
+    final availableItineraries = itineraries.where((it) {
+      return isItineraryMapAvailableAtDeparture(it, when);
+    }).toList();
+
+    if (availableItineraries.isEmpty) {
+      return null;
+    }
+
     double preferenceCost(Map<String, dynamic> itinerary) {
       final duration =
           (itinerary['duration'] as num?)?.toDouble() ?? double.infinity;
@@ -189,7 +222,7 @@ class OfflineRaptorRouter {
           transfers * transferPenalty;
     }
 
-    itineraries.sort((left, right) {
+    availableItineraries.sort((left, right) {
       final preferenceComparison = preferenceCost(
         left,
       ).compareTo(preferenceCost(right));
@@ -213,7 +246,7 @@ class OfflineRaptorRouter {
       return transferComparison;
     });
     return {
-      'itineraries': itineraries.take(6).toList(),
+      'itineraries': availableItineraries.take(6).toList(),
       'offlineRouting': true,
     };
   }
@@ -435,6 +468,23 @@ class OfflineRaptorRouter {
         calendar[date.weekday - 1] == true;
   }
 
+  _Trip _shiftTripByDay(_Trip trip, int deltaSeconds) => _Trip(
+        trip.id,
+        trip.routeId,
+        trip.serviceId,
+        trip.headsign,
+        trip.calls
+            .map((c) => _Call(
+                  c.stopId,
+                  c.arrival + deltaSeconds,
+                  c.departure + deltaSeconds,
+                ))
+            .toList(growable: false),
+        trip.frequencies
+            .map((f) => [f[0] + deltaSeconds, f[1] + deltaSeconds, f[2]])
+            .toList(growable: false),
+      );
+
   Map<String, dynamic> _toItinerary({
     required Map<String, dynamic> data,
     required DateTime departure,
@@ -611,6 +661,19 @@ class OfflineRaptorRouter {
                 : 0);
       },
     );
+    for (final leg in legs) {
+      final legDist = _legDistanceMeters(leg);
+      leg['distanceMeters'] = legDist;
+      final legTo = leg['to'];
+      if (legTo is Map && legTo['lat'] is num && legTo['lon'] is num) {
+        leg['distanceToDestinationMeters'] = _distance(
+          (legTo['lat'] as num).toDouble(),
+          (legTo['lon'] as num).toDouble(),
+          toLat,
+          toLon,
+        );
+      }
+    }
     final distanceMeters = legs.fold<double>(
       0,
       (total, leg) => total + _legDistanceMeters(leg),
