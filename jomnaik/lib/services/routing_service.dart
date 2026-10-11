@@ -172,11 +172,7 @@ class RoutingService {
       (itinerary) => itinerary['routeCategory'] == 'walk',
     );
 
-    if (usedOfflineTransit) {
-      onMessage(
-        'Using offline timetable routing. Live transit updates are unavailable.',
-      );
-    } else if (!hasTransit) {
+    if (!hasTransit) {
       onMessage(
         'No public transport route found. Showing alternative travel options.',
       );

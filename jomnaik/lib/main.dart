@@ -1712,9 +1712,6 @@ class _MapViewState extends State<MapView> {
         walkingPreference: _walkingPreference,
       );
       if (result != null) {
-        _showMessage(
-          'Using offline timetable routing. Live updates are unavailable.',
-        );
         final alternatives = _addDirectModeAlternatives(
           result,
           fromLat: fromLat,
