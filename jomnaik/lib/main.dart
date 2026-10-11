@@ -1934,7 +1934,7 @@ class _MapViewState extends State<MapView> {
     }
 
     final itineraries = List<dynamic>.from(convertedExisting);
-    final hasCategory = (String category) => itineraries.any(
+    bool hasCategory(String category) => itineraries.any(
       (itinerary) =>
           itinerary is Map &&
           itinerary['routeCategory']?.toString() == category,
