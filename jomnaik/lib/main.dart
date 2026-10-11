@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:math' show Point;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
@@ -15,9 +16,18 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'backend_client.dart';
 import 'map_tiles_source.dart';
+import 'models/itinerary.dart';
+import 'models/transit.dart';
+import 'models/search.dart';
+import 'screens/startup_screen.dart';
+import 'screens/profile_screen.dart';
+import 'screens/unsupported_zone_screen.dart';
 import 'widgets/live_guidance_card.dart';
+import 'widgets/station_details_sheet.dart';
+import 'widgets/itinerary_sheet.dart';
+import 'widgets/route_choices_sheet.dart';
+import 'widgets/incident_report_sheet.dart';
 import 'offline_raptor_router.dart';
-import 'widgets/privacy_policy_screen.dart';
 
 const _configuredGtfsBackendBaseUrl = String.fromEnvironment(
   'GTFS_BACKEND_URL',
@@ -34,10 +44,6 @@ const _supabasePublishableKey = String.fromEnvironment(
   defaultValue:
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndieHNpaGx2ZnNhZnBjcWZibG5nIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNjE5ODIsImV4cCI6MjA5OTgzNzk4Mn0.kJ9rlyB0rTrx1hEvCvLteAKgHQheGEDbFspVaXN9OK4',
 );
-const _privacyPolicyVersion = '2026-08-04-v3';
-const _privacyPolicyEffectiveDate = '4 August 2026';
-const _privacyPolicyConsentKey = 'privacy_policy_consent_version';
-const _privacyPolicyAcceptedAtKey = 'privacy_policy_accepted_at';
 const _completedJourneysKey = 'completed_journeys_v1';
 const _completedJourneyLimit = 20;
 // Temporary incident-report test hook. Remove once station selection is wired
@@ -69,16 +75,6 @@ String get _backendBaseUrl {
   return _deployedBackendBaseUrl;
 }
 
-Future<void> _savePrivacyConsent() async {
-  await _privacyStorage.write(
-    key: _privacyPolicyConsentKey,
-    value: _privacyPolicyVersion,
-  );
-  await _privacyStorage.write(
-    key: _privacyPolicyAcceptedAtKey,
-    value: DateTime.now().toUtc().toIso8601String(),
-  );
-}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -96,61 +92,11 @@ class JomRideApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(title: 'JomRide', home: _StartupScreen());
-  }
-}
-
-class _StartupScreen extends StatefulWidget {
-  const _StartupScreen();
-
-  @override
-  State<_StartupScreen> createState() => _StartupScreenState();
-}
-
-class _StartupScreenState extends State<_StartupScreen> {
-  Timer? _startupTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _startupTimer = Timer(const Duration(milliseconds: 1600), () {
-      unawaited(_continueAfterSplash());
-    });
-  }
-
-  Future<void> _continueAfterSplash() async {
-    final acceptedVersion = await _privacyStorage.read(
-      key: _privacyPolicyConsentKey,
-    );
-    if (!mounted) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute<void>(
-        builder: (_) => acceptedVersion == _privacyPolicyVersion
-            ? const MapView()
-            : PrivacyPolicyScreen(
-                effectiveDate: _privacyPolicyEffectiveDate,
-                onSaveConsent: _savePrivacyConsent,
-                homeBuilder: (_) => const MapView(),
-              ),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _startupTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [Image.asset('assets/logo.png', width: 220, height: 220)],
-        ),
+    return const MaterialApp(
+      title: 'JomRide',
+      home: StartupScreen(
+        nextScreen: MapView(),
+        storage: _privacyStorage,
       ),
     );
   }
@@ -210,7 +156,6 @@ class _MapViewState extends State<MapView> {
   final _placeSearchFocusNode = FocusNode();
   Timer? _placeSearchDebounce;
   Timer? _weatherDebounce;
-  String? _weatherTemperature;
   String? _weatherCondition;
   LatLng? _weatherCentre;
   CameraPosition? _lastCameraPosition;
@@ -223,15 +168,37 @@ class _MapViewState extends State<MapView> {
   int _placeSearchRequestId = 0;
   DateTime? _lastLocationWorkAt;
   bool _routeRequestInFlight = false;
-  final Map<String, _TimedCache<List<StopDeparture>>> _departureCache = {};
-  final Map<String, _TimedCache<_TrafficCongestion?>> _trafficCache = {};
+  final Map<String, TimedCache<List<StopDeparture>>> _departureCache = {};
+  final Map<String, TimedCache<TrafficCongestion?>> _trafficCache = {};
   bool _isSearchOpen = true;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
-  List<_TransitStation> _railStations = const [];
-  Map<String, _TransitStop> _transitStopsById = const {};
-  _TransitStation? _nearestStation;
+  List<TransitStation> _railStations = const [];
+  Map<String, TransitStop> _transitStopsById = const {};
+  TransitStation? _nearestStation;
   int _selectedTab = 0;
+  bool _isScrollingCard = false;
+  Timer? _scrollCardDebounce;
+
+  void _setScrollingCard(bool isScrolling) {
+    _scrollCardDebounce?.cancel();
+    if (isScrolling) {
+      if (!_isScrollingCard && mounted) {
+        setState(() => _isScrollingCard = true);
+      }
+      _scrollCardDebounce = Timer(const Duration(milliseconds: 300), () {
+        if (_isScrollingCard && mounted) {
+          setState(() => _isScrollingCard = false);
+        }
+      });
+    } else {
+      _scrollCardDebounce = Timer(const Duration(milliseconds: 150), () {
+        if (_isScrollingCard && mounted) {
+          setState(() => _isScrollingCard = false);
+        }
+      });
+    }
+  }
 
   bool get _canReportIncident =>
       _isSupabaseConfigured &&
@@ -331,6 +298,7 @@ class _MapViewState extends State<MapView> {
     _authSubscription?.cancel();
     _placeSearchDebounce?.cancel();
     _weatherDebounce?.cancel();
+    _scrollCardDebounce?.cancel();
     _placeSearchFocusNode.dispose();
     _placeSearchController.dispose();
     _httpClient.close();
@@ -490,8 +458,6 @@ class _MapViewState extends State<MapView> {
             requestVersion == _weatherRequestVersion) {
           setState(() {
             _weatherCentre = centre;
-            _weatherTemperature =
-                '${(data['current_temp'] as num).toStringAsFixed(1)}°';
             _weatherCondition = data['forecast']?.toString();
           });
         } else {
@@ -576,28 +542,6 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  void _togglePlaceSearch() {
-    final willOpen = !_isSearchOpen;
-    setState(() {
-      _isSearchOpen = willOpen;
-      if (!willOpen) {
-        _placeSearchDebounce?.cancel();
-        _placeSearchRequestId++;
-        _placeSearchController.clear();
-        _selectedPlace = null;
-        _placeSearchResults = const [];
-        _isSearchingPlaces = false;
-        unawaited(_clearSelectedPlaceMarker());
-      }
-    });
-    if (willOpen) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _placeSearchFocusNode.requestFocus();
-      });
-    } else {
-      _placeSearchFocusNode.unfocus();
-    }
-  }
 
   Future<void> _clearSelectedPlaceMarker() async {
     final marker = _selectedPlaceMarker;
@@ -901,6 +845,7 @@ class _MapViewState extends State<MapView> {
       'rail_stops_layer',
       'transit_stops_layer',
     ], null);
+    if (!mounted) return;
     if (features != null && features.isNotEmpty) {
       final feature = features.first;
       final properties = feature is Map && feature['properties'] is Map
@@ -1056,104 +1001,7 @@ class _MapViewState extends State<MapView> {
         : const [];
   }
 
-  String _routeOptionTitle(Map<String, dynamic> itinerary) {
-    switch (itinerary['routeCategory']?.toString()) {
-      case 'rail':
-        return 'Mostly rail';
-      case 'bus':
-        return 'Mostly bus';
-      case 'ehailing':
-        return 'E-hailing';
-      case 'hybrid':
-        return 'E-hailing + transit';
-    }
-    final modes = _itineraryLegs(
-      itinerary,
-    ).map((leg) => leg['mode']?.toString().toUpperCase()).toSet();
-    if (modes.contains('HAIL')) return 'E-hailing';
-    final hasBus = modes.contains('BUS');
-    final hasRail = modes.any(
-      (mode) => mode == 'RAIL' || mode == 'SUBWAY' || mode == 'TRAM',
-    );
-    if (hasBus && hasRail) return 'Bus & rail';
-    if (hasRail) return 'Rail';
-    if (hasBus) return 'Bus';
-    return 'Walking';
-  }
 
-  IconData _routeOptionIcon(Map<String, dynamic> itinerary) {
-    switch (_routeOptionTitle(itinerary)) {
-      case 'E-hailing':
-      case 'E-hailing + transit':
-        return Icons.local_taxi;
-      case 'Bus':
-        return Icons.directions_bus;
-      case 'Rail':
-        return Icons.train;
-      case 'Bus & rail':
-        return Icons.directions_transit;
-      default:
-        return Icons.directions_walk;
-    }
-  }
-
-  String _routeOptionSummary(Map<String, dynamic> itinerary) {
-    final services = _itineraryLegs(itinerary)
-        .where(
-          (leg) =>
-              !{'WALK', 'HAIL'}.contains(leg['mode']?.toString().toUpperCase()),
-        )
-        .map((leg) => leg['routeShortName']?.toString())
-        .whereType<String>()
-        .where((name) => name.isNotEmpty)
-        .toList();
-    final sheltered = _itineraryLegs(itinerary).any(
-      (leg) =>
-          leg['mode']?.toString().toUpperCase() == 'WALK' &&
-          leg['isSheltered'] == true,
-    );
-    final summary = services.isEmpty
-        ? 'Direct journey estimate'
-        : services.join(' → ');
-    final congestion = itinerary['congestion'];
-    final stationActivity = congestion is Map
-        ? congestion['stationActivity']
-        : null;
-    final hasBusyStation =
-        stationActivity is List &&
-        stationActivity.any(
-          (station) => station is Map && station['level'] == 'high',
-        );
-    final signals = <String>[
-      if (sheltered) 'Sheltered walkways',
-      if (hasBusyStation) 'Busy station reported',
-    ];
-    return signals.isEmpty ? summary : '$summary • ${signals.join(' • ')}';
-  }
-
-  String _fareLabel(Itinerary itinerary) {
-    if (itinerary.fareMin != null && itinerary.fareMax != null) {
-      return 'RM${itinerary.fareMin!.toStringAsFixed(2)}–RM${itinerary.fareMax!.toStringAsFixed(2)}';
-    }
-
-    final fare = itinerary.fareAmount;
-    return fare == null ? '' : 'RM${fare.toStringAsFixed(2)}';
-  }
-
-  String _incidentStatusLabel(int count) {
-    if (count >= 3) return 'High incident status';
-    if (count == 2) return 'Medium incident status';
-    return 'Low incident status';
-  }
-
-  String _formatDuration(num seconds) {
-    final totalMinutes = (seconds / 60).ceil();
-    final hours = totalMinutes ~/ 60;
-    final minutes = totalMinutes % 60;
-    if (hours == 0) return '$minutes min';
-    if (minutes == 0) return '${hours}h';
-    return '${hours}h ${minutes}m';
-  }
 
   int _durationFromLegs(List<Map<String, dynamic>> legs, int fallback) {
     if (legs.isEmpty) return fallback;
@@ -1286,73 +1134,9 @@ class _MapViewState extends State<MapView> {
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Choose a route',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Close',
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              ...itineraries.map((itinerary) {
-                final option = Itinerary.fromJson(itinerary);
-                return Card(
-                  child: ListTile(
-                    leading: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(_routeOptionIcon(itinerary)),
-                        if (option.legs.any(
-                          (leg) => leg.incidentReports.isNotEmpty,
-                        )) ...[
-                          const SizedBox(width: 4),
-                          const Icon(
-                            Icons.warning_amber_rounded,
-                            color: Colors.orange,
-                            size: 20,
-                          ),
-                        ],
-                      ],
-                    ),
-                    title: Text(_routeOptionTitle(itinerary)),
-                    subtitle: Text(_routeOptionSummary(itinerary)),
-                    trailing: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(_formatDuration(option.duration)),
-                        if (_fareLabel(option).isNotEmpty)
-                          Text(
-                            _fareLabel(option),
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                      ],
-                    ),
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      _applyItinerary(itinerary);
-                    },
-                  ),
-                );
-              }),
-            ],
-          ),
-        ),
+      builder: (context) => RouteChoicesSheet(
+        itineraries: itineraries,
+        onSelectItinerary: _applyItinerary,
       ),
     );
   }
@@ -3322,7 +3106,7 @@ class _MapViewState extends State<MapView> {
     unawaited(_logAnonymousStationPresence(stop));
   }
 
-  Future<void> _logAnonymousStationPresence(_TransitStop stop) async {
+  Future<void> _logAnonymousStationPresence(TransitStop stop) async {
     try {
       // Deliberately omit user IDs, device IDs, and raw GPS coordinates.
       final response = await _httpClient.post(
@@ -3353,7 +3137,7 @@ class _MapViewState extends State<MapView> {
         _transitStopsById[_temporaryIncidentReportStopId] ??
         _transitStopsById.values.firstWhere(
           (candidate) => candidate.id.split(':').last == 'KJ15',
-          orElse: () => const _TransitStop(
+          orElse: () => const TransitStop(
             id: _temporaryIncidentReportStopId,
             name: 'KL SENTRAL - REDONE',
             lat: 3.13442,
@@ -3379,67 +3163,19 @@ class _MapViewState extends State<MapView> {
       affectedRoute = await showModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
-        builder: (sheetContext) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Which bus is affected?',
-                  style: Theme.of(sheetContext).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 8),
-                ...routes.map(
-                  (route) => ListTile(
-                    leading: const Icon(Icons.directions_bus),
-                    title: Text('Bus $route'),
-                    onTap: () => Navigator.of(sheetContext).pop(route),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+        builder: (sheetContext) => BusRouteSelectionSheet(routes: routes),
       );
       if (affectedRoute == null) return;
     }
     if (!mounted) return;
 
-    final report = await showModalBottomSheet<_IncidentType>(
+    final report = await showModalBottomSheet<IncidentType>(
       context: context,
       showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                isBusStop
-                    ? 'Report bus ${affectedRoute!}'
-                    : 'Report a rail incident',
-                style: Theme.of(sheetContext).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 4),
-              const Text('Reporting for KL Sentral LRT station'),
-              const SizedBox(height: 12),
-              ..._IncidentType.values
-                  .where((type) => type.isBus == isBusStop)
-                  .map(
-                    (type) => ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(type.icon, color: Colors.red.shade700),
-                      title: Text(type.label),
-                      subtitle: Text(type.description),
-                      onTap: () => Navigator.of(sheetContext).pop(type),
-                    ),
-                  ),
-            ],
-          ),
-        ),
+      builder: (sheetContext) => IncidentTypeSelectionSheet(
+        isBusStop: isBusStop,
+        stopName: stop.name,
+        affectedRoute: affectedRoute,
       ),
     );
     if (report == null) return;
@@ -3519,7 +3255,7 @@ class _MapViewState extends State<MapView> {
     _nearbyStationClusterKey = clusterKey;
     _isStationChoicePromptOpen = true;
     try {
-      final selected = await showModalBottomSheet<_TransitStop>(
+      final selected = await showModalBottomSheet<TransitStop>(
         context: context,
         showDragHandle: true,
         builder: (sheetContext) => SafeArea(
@@ -3714,314 +3450,32 @@ class _MapViewState extends State<MapView> {
     required String stopName,
     required String routes,
     required String transitType,
-    _TransitStop? stop,
+    TransitStop? stop,
   }) {
-    Future<List<StopDeparture>> departureFuture = _fetchNextDepartures(stopId);
-    Future<_TrafficCongestion?> congestionFuture = stop == null
-        ? Future.value(null)
-        : _fetchTrafficCongestion(stopId, stop.lat, stop.lon);
-    var incidents = _fetchStopIncidents(stopId, stop);
-    Timer? refreshTimer;
-    var refreshScheduled = false;
-    final modalFuture = showModalBottomSheet<void>(
+    showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          // GTFS-Realtime vehicle positions are refreshed by the backend's
-          // 20-second cache. Poll while this stop sheet is visible so live
-          // estimates update without requiring the user to close and reopen it.
-          if (!refreshScheduled) {
-            refreshScheduled = true;
-            refreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
-              setModalState(() {
-                departureFuture = _fetchNextDepartures(stopId);
-                if (stop != null) {
-                  congestionFuture = _fetchTrafficCongestion(
-                    stopId,
-                    stop.lat,
-                    stop.lon,
-                  );
-                }
-                incidents = _fetchStopIncidents(stopId, stop);
-              });
-            });
+      builder: (context) => StationDetailsSheet(
+        stopId: stopId,
+        stopName: stopName,
+        routes: routes,
+        transitType: transitType,
+        stop: stop,
+        onGetDirections: () {
+          Navigator.of(context).pop();
+          if (stop != null) {
+            _getDirectionsToPlace(stop.asPlaceSearchResult());
           }
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            // Keep drags that start on the station card from reaching the
-            // native map view underneath. The inner scroll view handles its
-            // own vertical scrolling.
-            onPanStart: (_) {},
-            onPanUpdate: (_) {},
-            onPanEnd: (_) {},
-            child: SafeArea(
-            child: SizedBox(
-              width: double.infinity,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        stopName,
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${transitType == 'rail' ? 'Rail station' : 'Bus stop'} routes',
-                        style: Theme.of(context).textTheme.labelLarge,
-                      ),
-                      const SizedBox(height: 12),
-                      FilledButton.icon(
-                        onPressed: stop == null
-                            ? null
-                            : () {
-                                Navigator.of(context).pop();
-                                _getDirectionsToPlace(
-                                  stop.asPlaceSearchResult(),
-                                );
-                              },
-                        icon: const Icon(Icons.directions),
-                        label: const Text('Directions'),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: routes
-                            .split(', ')
-                            .map((route) => Chip(label: Text(route)))
-                            .toList(),
-                      ),
-                      const SizedBox(height: 24),
-                      FutureBuilder<List<StationIncident>>(
-                        future: incidents,
-                        builder: (context, snapshot) {
-                          final currentIncidents = snapshot.data ?? const [];
-                          final reportCount = currentIncidents.fold<int>(
-                            0,
-                            (total, incident) => total + incident.count,
-                          );
-                          final reportLevel = snapshot.hasError
-                              ? 'Unavailable'
-                                : snapshot.connectionState !=
-                                      ConnectionState.done
-                              ? 'Loading'
-                              : _incidentStatusLabel(reportCount);
-                          final reportColor = snapshot.hasError
-                              ? Colors.blueGrey
-                              : reportCount >= 3
-                              ? Colors.red
-                              : reportCount == 2
-                              ? Colors.orange
-                              : Colors.green;
-                          final reportMessage = snapshot.hasError
-                              ? 'Incident report level unavailable.'
-                                : snapshot.connectionState !=
-                                      ConnectionState.done
-                              ? 'Loading recent reports…'
-                              : reportCount == 0
-                              ? 'No reports in the last 15 minutes.'
-                              : '$reportCount recent report${reportCount == 1 ? '' : 's'}';
-                          return Container(
-                            width: double.infinity,
-                            margin: const EdgeInsets.only(bottom: 20),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: reportColor.shade50,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Icon(
-                                      Icons.warning_amber_rounded,
-                                      color: reportColor,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Incident report level: $reportLevel',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 4),
-                                Text(reportMessage),
-                                if (currentIncidents.isNotEmpty) ...[
-                                  const SizedBox(height: 8),
-                                  ...currentIncidents.map(
-                                    (incident) => Padding(
-                                        padding: const EdgeInsets.only(
-                                          bottom: 4,
-                                        ),
-                                      child: Text(
-                                        '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                      FutureBuilder<_TrafficCongestion?>(
-                        future: congestionFuture,
-                        builder: (context, snapshot) {
-                          final congestion = snapshot.data;
-                          return congestion == null
-                              ? const SizedBox.shrink()
-                              : _buildCongestionIndicator(congestion);
-                        },
-                      ),
-                      Text(
-                        'Next departures',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      FutureBuilder<List<StopDeparture>>(
-                        future: departureFuture,
-                        builder: (context, snapshot) {
-                          if (snapshot.connectionState !=
-                              ConnectionState.done) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 16),
-                                child: Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                            );
-                          }
-                          if (snapshot.hasError) {
-                            return Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                              child: Row(
-                                children: [
-                                  const Expanded(
-                                    child: Text(
-                                      'Departure times are unavailable.',
-                                    ),
-                                  ),
-                                  TextButton.icon(
-                                    onPressed: () {
-                                      Navigator.of(context).pop();
-                                      _showStopDetails(
-                                        stopId: stopId,
-                                        stopName: stopName,
-                                        routes: routes,
-                                        transitType: transitType,
-                                        stop: stop,
-                                      );
-                                    },
-                                    icon: const Icon(Icons.refresh),
-                                    label: const Text('Retry'),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }
-
-                          final nextDepartures = snapshot.data ?? const [];
-                          if (nextDepartures.isEmpty) {
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Text(
-                                    'No upcoming scheduled departures.',
-                                  ),
-                                ),
-                              ],
-                            );
-                          }
-                          return Column(
-                            children: [
-                              ...nextDepartures.map(
-                                (departure) => ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: const Icon(Icons.schedule),
-                                  // Make the bound terminal the primary label:
-                                  // e.g. "To Gombak   8:12 PM". Some GTFS feeds
-                                  // supply a verbose "From A to B" headsign;
-                                  // station cards should show only where this
-                                  // particular departure is going.
-                                  // The line remains visible beneath it.
-                                  title: Text(
-                                    departure.displayDirection.isNotEmpty
-                                        ? departure.displayDirection
-                                        : departure.route,
-                                  ),
-                                  subtitle: Text(
-                                    [
-                                        if (departure
-                                            .displayDirection
-                                            .isNotEmpty)
-                                        departure.route,
-                                      departure.isEstimated
-                                          ? 'Live vehicle estimate'
-                                          : 'Scheduled time',
-                                    ].join(' • '),
-                                  ),
-                                  trailing: departure.isEstimated
-                                      ? Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.end,
-                                          children: [
-                                            Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 8,
-                                                    vertical: 3,
-                                                  ),
-                                              decoration: BoxDecoration(
-                                                color: Colors.blue.shade50,
-                                                borderRadius:
-                                                    BorderRadius.circular(6),
-                                              ),
-                                              child: Text(
-                                                departure.minutesRemaining,
-                                                style: TextStyle(
-                                                  color: Colors.blue.shade800,
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.w700,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        )
-                                      : Text(
-                                          departure.time,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            ),
-          );
         },
+        fetchDepartures: () => _fetchNextDepartures(stopId),
+        fetchCongestion: () => stop == null
+            ? Future<TrafficCongestion?>.value(null)
+            : _fetchTrafficCongestion(stopId, stop.lat, stop.lon),
+        fetchIncidents: () => _fetchStopIncidents(stopId, stop),
       ),
     );
-    modalFuture.whenComplete(() => refreshTimer?.cancel());
+    return;
   }
 
   Future<List<StopDeparture>> _fetchNextDepartures(String stopId) async {
@@ -4054,13 +3508,13 @@ class _MapViewState extends State<MapView> {
               StopDeparture.fromJson(Map<String, dynamic>.from(departure)),
         )
         .toList();
-    _departureCache[stopId] = _TimedCache(departures);
+    _departureCache[stopId] = TimedCache(departures);
     return departures;
   }
 
   Future<List<StationIncident>> _fetchStopIncidents(
     String stopId,
-    _TransitStop? stop,
+    TransitStop? stop,
   ) async {
     final response = await _httpClient
         .get(
@@ -4119,7 +3573,7 @@ class _MapViewState extends State<MapView> {
     return grouped.values.toList();
   }
 
-  Future<_TrafficCongestion?> _fetchTrafficCongestion(
+  Future<TrafficCongestion?> _fetchTrafficCongestion(
     String stationId,
     double latitude,
     double longitude,
@@ -4146,44 +3600,16 @@ class _MapViewState extends State<MapView> {
       if (response.statusCode != 200) return null;
       final data = jsonDecode(response.body);
       if (data is! Map) return null;
-      final congestion = _TrafficCongestion.fromJson(
+      final congestion = TrafficCongestion.fromJson(
         Map<String, dynamic>.from(data),
       );
-      _trafficCache[cacheKey] = _TimedCache(congestion);
+      _trafficCache[cacheKey] = TimedCache(congestion);
       return congestion;
     } catch (_) {
       return null;
     }
   }
 
-  Widget _buildCongestionIndicator(_TrafficCongestion congestion) {
-    final color = switch (congestion.level) {
-      'road_closed' || 'heavy' => Colors.red,
-      'moderate' => Colors.orange,
-      _ => Colors.green,
-    };
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: color.shade50,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.circle, color: color, size: 12),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              congestion.label,
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Future<void> _loadAndRenderOfflineStops() async {
     try {
@@ -4202,14 +3628,14 @@ class _MapViewState extends State<MapView> {
           .toList();
       final stations = stopFeatures
           .whereType<Map>()
-          .map((feature) => _TransitStation.fromGeoJson(feature))
-          .whereType<_TransitStation>()
+          .map((feature) => TransitStation.fromGeoJson(feature))
+          .whereType<TransitStation>()
           .toList();
       final stops = stopFeatures
-          .map((feature) => _TransitStop.fromGeoJson(feature))
-          .whereType<_TransitStop>()
+          .map((feature) => TransitStop.fromGeoJson(feature))
+          .whereType<TransitStop>()
           .toList();
-      final stopsById = <String, _TransitStop>{
+      final stopsById = <String, TransitStop>{
         for (final stop in stops) stop.id: stop,
       };
       if (mounted) {
@@ -4441,64 +3867,7 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  String _formatTime(String rawTimestamp) {
-    if (rawTimestamp.isEmpty) return '--:--';
 
-    final int? milliseconds = int.tryParse(rawTimestamp);
-    final DateTime? parsedTime = milliseconds == null
-        ? DateTime.tryParse(rawTimestamp)
-        : DateTime.fromMillisecondsSinceEpoch(milliseconds);
-    if (parsedTime == null) return '--:--';
-
-    // MOTIS returns ISO-8601 timestamps. Convert both legacy epoch values and
-    // MOTIS timestamps to the device's local clock, without ever displaying a
-    // date in the itinerary.
-    final localTime = parsedTime.toLocal();
-
-    // Format to standard 12-hour AM/PM string structure
-    final int hour = localTime.hour == 0
-        ? 12
-        : (localTime.hour > 12 ? localTime.hour - 12 : localTime.hour);
-    final String minute = localTime.minute.toString().padLeft(2, '0');
-    final String period = localTime.hour >= 12 ? 'PM' : 'AM';
-
-    return '$hour:$minute $period';
-  }
-
-  Future<void> _showLegIncidents(ItineraryLeg leg) async {
-    if (leg.incidentReports.isEmpty) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Recent service reports',
-                style: Theme.of(sheetContext).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 8),
-              ...leg.incidentReports.map(
-                (incident) => ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(
-                    Icons.warning_amber_rounded,
-                    color: Colors.orange,
-                  ),
-                  title: Text(incident.label),
-                  subtitle: Text(incident.stationName),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 
   Widget _buildNearestStationCard() {
     final station = _nearestStation;
@@ -4549,7 +3918,7 @@ class _MapViewState extends State<MapView> {
                     ),
                     station == null
                         ? Text(distanceLabel)
-                        : FutureBuilder<_StationCrowd>(
+                        : FutureBuilder<StationCrowd>(
                             future: crowdFuture,
                             builder: (context, snapshot) {
                               final crowd = snapshot.data;
@@ -4704,7 +4073,7 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  Future<_StationCrowd> _fetchStationCrowd(String stationId) async {
+  Future<StationCrowd> _fetchStationCrowd(String stationId) async {
     final response = await _httpClient
         .get(
           Uri.parse(
@@ -4718,13 +4087,13 @@ class _MapViewState extends State<MapView> {
     }
     final data = jsonDecode(response.body);
     if (data is! Map) throw const FormatException('Invalid crowd response');
-    return _StationCrowd.fromJson(Map<String, dynamic>.from(data));
+    return StationCrowd.fromJson(Map<String, dynamic>.from(data));
   }
 
   @override
   Widget build(BuildContext context) {
     if (_isOutsideSupportedZone) {
-      return const Scaffold(body: _UnsupportedZoneScreen());
+      return const Scaffold(body: UnsupportedZoneScreen());
     }
     final isMapTab = _selectedTab == 0;
     final itineraryIsOpen = _selectedTab == 0 && _currentItinerary != null;
@@ -4829,11 +4198,11 @@ class _MapViewState extends State<MapView> {
                           ),
                         // Weather is keyed to the visible map centre.
                           trackCameraPosition: true,
-                        scrollGesturesEnabled: true,
-                        zoomGesturesEnabled: true,
-                        rotateGesturesEnabled: true,
-                        tiltGesturesEnabled: true,
-                        doubleClickZoomEnabled: true,
+                        scrollGesturesEnabled: !_isScrollingCard,
+                        zoomGesturesEnabled: !_isScrollingCard,
+                        rotateGesturesEnabled: !_isScrollingCard,
+                        tiltGesturesEnabled: !_isScrollingCard,
+                        doubleClickZoomEnabled: !_isScrollingCard,
                           onMapCreated: _onMapCreated,
                         onMapClick: (point, coordinate) =>
                                     _handleMapStartPick(point, coordinate),
@@ -4856,15 +4225,37 @@ class _MapViewState extends State<MapView> {
                           top: 66,
                           left: 16,
                           right: 16,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            // Claim taps on the floating search/station panel
-                            // so they cannot fall through to MapLibre beneath it.
-                            onTap: () {},
-                            onPanStart: (_) {},
-                            onPanUpdate: (_) {},
-                            onPanEnd: (_) {},
-                            child: _buildMapTopPanel(),
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: (notification) {
+                              if (notification is ScrollStartNotification ||
+                                  notification is UserScrollNotification) {
+                                _setScrollingCard(true);
+                              } else if (notification is ScrollEndNotification) {
+                                _setScrollingCard(false);
+                              }
+                              return false;
+                            },
+                            child: Listener(
+                              behavior: HitTestBehavior.opaque,
+                              onPointerDown: (_) => _setScrollingCard(true),
+                              onPointerUp: (_) => _setScrollingCard(false),
+                              onPointerCancel: (_) => _setScrollingCard(false),
+                              onPointerSignal: (event) {
+                                if (event is PointerScrollEvent) {
+                                  _setScrollingCard(true);
+                                }
+                              },
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                // Claim taps on the floating search/station panel
+                                // so they cannot fall through to MapLibre beneath it.
+                                onTap: () {},
+                                onPanStart: (_) => _setScrollingCard(true),
+                                onPanUpdate: (_) => _setScrollingCard(true),
+                                onPanEnd: (_) => _setScrollingCard(false),
+                                child: _buildMapTopPanel(),
+                              ),
+                            ),
                           ),
                         ),
                       if (_currentItinerary == null && _canReportIncident)
@@ -4881,395 +4272,42 @@ class _MapViewState extends State<MapView> {
                           ),
                         ),
                       if (_currentItinerary != null)
-                        DraggableScrollableSheet(
-                          initialChildSize: _itineraryInitialExtent,
-                          minChildSize: 0.25,
-                          maxChildSize: 1,
-                          builder: (BuildContext context, ScrollController scrollController) {
-                            return NotificationListener<
-                              DraggableScrollableNotification
-                            >(
-                              onNotification: (notification) {
-                                if ((notification.extent -
-                                            _itineraryInitialExtent)
-                                        .abs() >
-                                    0.005) {
-                                  _markItineraryUserInteracted();
-                                }
-                                return false;
-                              },
-                              child: NotificationListener<ScrollNotification>(
-                                onNotification: (notification) {
-                                  if (notification is ScrollStartNotification &&
-                                      notification.dragDetails != null) {
-                                    _markItineraryUserInteracted();
-                                  }
-                                  return false;
-                                },
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  // Catch map drags that begin on the itinerary
-                                  // surface. The nested ListView keeps its own
-                                  // scroll/drag recognizers.
-                                  onPanStart: (_) {},
-                                  onPanUpdate: (_) {},
-                                  onPanEnd: (_) {},
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    borderRadius: const BorderRadius.vertical(
-                                      top: Radius.circular(20),
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.black12,
-                                        blurRadius: 10,
-                                        spreadRadius: 2,
-                                      ),
-                                    ],
-                                  ),
-                                  child: ListView.builder(
-                                    controller: scrollController,
-                                    padding: EdgeInsets.zero,
-                                    itemCount:
-                                        _currentItinerary!.legs.length + 1,
-                                    itemBuilder: (context, index) {
-                                      if (index == 0) {
-                                        // Header Summary Card
-                                        final weatherReminder =
-                                            _weatherItineraryReminder(
-                                              _currentItinerary!,
-                                            );
-                                        return Padding(
-                                          padding: const EdgeInsets.fromLTRB(
-                                            16,
-                                            4,
-                                            16,
-                                            16,
-                                          ),
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Center(
-                                                child: Container(
-                                                  width: 40,
-                                                  height: 5,
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.grey[300],
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                ),
-                                              ),
-                                              const SizedBox(height: 12),
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: Text(
-                                                      'Total Travel Time: ${_formatDuration(_currentItinerary!.duration)}',
-                                                      style: const TextStyle(
-                                                        fontSize: 18,
-                                                        fontWeight:
-                                                            FontWeight.bold,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  IconButton(
-                                                      tooltip:
-                                                          'Close itinerary',
-                                                    icon: const Icon(
-                                                      Icons.close,
-                                                    ),
-                                                    onPressed:
-                                                        _dismissItinerary,
-                                                  ),
-                                                ],
-                                              ),
-                                              if (_currentItinerary!
-                                                      .fareAmount !=
-                                                  null)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        top: 4,
-                                                      ),
-                                                  child: Text(
-                                                    '${_currentItinerary!.fareLabel ?? 'Estimated fare'}: ${_fareLabel(_currentItinerary!)}',
-                                                    style: const TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.w700,
-                                                    ),
-                                                  ),
-                                                ),
-                                              if (_currentItinerary!
-                                                      .fallbackMessage !=
-                                                  null) ...[
-                                                const SizedBox(height: 8),
-                                                Text(
-                                                  _currentItinerary!
-                                                      .fallbackMessage!,
-                                                  style: TextStyle(
-                                                    color: Colors.orange[800],
-                                                  ),
-                                                ),
-                                              ],
-                                                if (weatherReminder !=
-                                                    null) ...[
-                                                const SizedBox(height: 8),
-                                                Container(
-                                                  width: double.infinity,
-                                                    padding:
-                                                        const EdgeInsets.all(
-                                                    10,
-                                                  ),
-                                                  decoration: BoxDecoration(
-                                                      color:
-                                                          Colors.blue.shade50,
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                  child: Row(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      const Icon(
-                                                          Icons
-                                                              .umbrella_outlined,
-                                                        color: Colors.blue,
-                                                      ),
-                                                        const SizedBox(
-                                                          width: 8,
-                                                        ),
-                                                      Expanded(
-                                                        child: Text(
-                                                          weatherReminder,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ],
-                                              const SizedBox(height: 8),
-                                              _buildJourneyGuidanceCard(),
-                                            ],
-                                          ),
-                                        );
-                                      }
-
-                                      final leg =
-                                          _currentItinerary!.legs[index - 1];
-                                      final isWalk =
-                                          leg.mode.toUpperCase() == 'WALK';
-                                      final isHail =
-                                          leg.mode.toUpperCase() == 'HAIL';
-                                      if (isWalk) {
-                                        final walkwayLabel = leg.isSheltered
-                                            ? 'Covered walkway'
-                                            : 'Open walkway';
-                                        final walkPrefix =
-                                            leg.isNearestStationAccess
-                                            ? 'Walk via nearest pedestrian road to:'
-                                            : leg.isTransferWalk
-                                            ? 'Transfer via pedestrian route to'
-                                            : 'Walk to';
-                                        return ListTile(
-                                          leading: Icon(
-                                            Icons.umbrella_outlined,
-                                            color: leg.isSheltered
-                                                ? Colors.teal
-                                                : Colors.grey,
-                                          ),
-                                          title: Text(
-                                            '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
-                                          ),
-                                          subtitle: Text(
-                                            '$walkwayLabel • ${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)}',
-                                          ),
-                                        );
-                                      }
-                                      if (isHail) {
-                                        return ListTile(
-                                          leading: const Icon(
-                                            Icons.local_taxi,
-                                            color: Colors.orange,
-                                          ),
-                                          title: Text(
-                                            leg.routeShortName ??
-                                                'E-hailing estimate',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                          subtitle: Text(
-                                            '${_formatTime(leg.startTime)} - ${_formatTime(leg.endTime)} • ${_fareLabel(_currentItinerary!).isEmpty ? 'Direct distance estimate' : _fareLabel(_currentItinerary!)} planning estimate (RM1–RM3/km; excludes surge and tolls)\nPayment: ${leg.paymentMethod ?? 'Pay in the e-hailing app'}',
-                                          ),
-                                          trailing: TextButton.icon(
-                                            onPressed: _openEhailingStore,
-                                            icon: const Icon(
-                                              Icons.open_in_new,
-                                              size: 16,
-                                            ),
-                                            label: Text(
-                                              defaultTargetPlatform ==
-                                                      TargetPlatform.iOS
-                                                  ? 'App Store'
-                                                  : 'Play Store',
-                                            ),
-                                          ),
-                                        );
-                                      }
-
-                                      return ExpansionTile(
-                                        leading: Icon(
-                                          Icons.directions_bus,
-                                          color: Colors.green,
-                                        ),
-                                        title: Wrap(
-                                          spacing: 6,
-                                          runSpacing: 2,
-                                          children: [
-                                            Text(
-                                              leg.routeShortName
-                                                          ?.trim()
-                                                          .isNotEmpty ==
-                                                      true
-                                                  ? leg.routeShortName!
-                                                  : 'Bus',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                            Text(
-                                              '→ ${leg.headsign ?? 'Direction'}',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                              if (leg
-                                                  .incidentReports
-                                                  .isNotEmpty)
-                                              const Icon(
-                                                Icons.warning_amber_rounded,
-                                                color: Colors.orange,
-                                              ),
-                                          ],
-                                        ),
-                                        subtitle: Wrap(
-                                          spacing: 8,
-                                          runSpacing: 4,
-                                          children: [
-                                            Text(
-                                              'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
-                                            ),
-                                            Text(
-                                              '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
-                                            ),
-                                            Text(
-                                              'Depart ${_formatTime(leg.startTime)} • Arrive ${_formatTime(leg.endTime)}',
-                                            ),
-                                            if (leg.paymentMethod != null)
-                                              Text(
-                                                '• Payment: ${leg.paymentMethod}',
-                                              ),
-                                            if (leg.liveBusEstimate != null)
-                                              Text(
-                                                'Live arrival: ${leg.liveBusEstimate!.minutesRemaining}${leg.liveBusEstimate!.trafficAdjusted ? ' • Traffic adjusted' : ''}',
-                                                style: const TextStyle(
-                                                  color: Colors.green,
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                              ),
-                                          ],
-                                        ),
-                                        children: [
-                                          ListTile(
-                                            dense: true,
-                                            leading: const Icon(
-                                              Icons.trip_origin,
-                                              color: Colors.green,
-                                            ),
-                                            title: Text(
-                                              'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
-                                            ),
-                                          ),
-                                          if (leg.incidentReports.isNotEmpty)
-                                            ListTile(
-                                              dense: true,
-                                              leading: const Icon(
-                                                Icons.warning_amber_rounded,
-                                                color: Colors.orange,
-                                              ),
-                                              title: Text(
-                                                _incidentStatusLabel(
-                                                  leg.incidentReports.length,
-                                                ),
-                                              ),
-                                              subtitle: Text(
-                                                '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'} • ${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
-                                              ),
-                                            ),
-                                          if (leg.intermediateStops.isEmpty)
-                                            const Padding(
-                                              padding: EdgeInsets.fromLTRB(
-                                                72,
-                                                0,
-                                                16,
-                                                8,
-                                              ),
-                                              child: Align(
-                                                  alignment:
-                                                      Alignment.centerLeft,
-                                                child: Text(
-                                                  'No intermediate stops provided.',
-                                                ),
-                                              ),
-                                            ),
-                                          ...leg.intermediateStops
-                                              .asMap()
-                                              .entries
-                                              .map((entry) {
-                                                final index = entry.key;
-                                                final stop = entry.value;
-                                                return ListTile(
-                                                  dense: true,
-                                                  leading: CircleAvatar(
-                                                    radius: 14,
-                                                      child: Text(
-                                                        '${index + 1}',
-                                                      ),
-                                                  ),
-                                                  title: Text(stop.name),
-                                                );
-                                              }),
-                                          ListTile(
-                                            dense: true,
-                                            leading: const Icon(
-                                              Icons.flag,
-                                              color: Colors.red,
-                                            ),
-                                            title: Text(
-                                              'Alight at ${leg.toPlace?.name ?? 'your destination'}',
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ),
-                              ),
-                            );
+                        NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is ScrollStartNotification ||
+                                notification is UserScrollNotification) {
+                              _setScrollingCard(true);
+                            } else if (notification is ScrollEndNotification) {
+                              _setScrollingCard(false);
+                            }
+                            return false;
                           },
+                          child: Listener(
+                            behavior: HitTestBehavior.opaque,
+                            onPointerDown: (_) => _setScrollingCard(true),
+                            onPointerUp: (_) => _setScrollingCard(false),
+                            onPointerCancel: (_) => _setScrollingCard(false),
+                            onPointerSignal: (event) {
+                              if (event is PointerScrollEvent) {
+                                _setScrollingCard(true);
+                              }
+                            },
+                            child: ItinerarySheet(
+                              itinerary: _currentItinerary!,
+                              initialExtent: _itineraryInitialExtent,
+                              weatherReminder:
+                                  _weatherItineraryReminder(_currentItinerary!),
+                              guidanceCard: _buildJourneyGuidanceCard(),
+                              onDismiss: _dismissItinerary,
+                              onFindApps: _openEhailingStore,
+                              onUserInteracted: _markItineraryUserInteracted,
+                            ),
+                          ),
                         ),
                     ],
                   ),
-            _ProfilePage(
+            ProfilePage(
+              isSupabaseConfigured: _isSupabaseConfigured,
               onStationLocationTrackingChanged:
                   _setStationLocationTrackingEnabled,
             ),
@@ -5333,1016 +4371,4 @@ class _MapViewState extends State<MapView> {
       ),
     );
   }
-}
-
-class _ProfilePage extends StatefulWidget {
-  const _ProfilePage({required this.onStationLocationTrackingChanged});
-
-  final ValueChanged<bool> onStationLocationTrackingChanged;
-
-  @override
-  State<_ProfilePage> createState() => _ProfilePageState();
-}
-
-class _ProfilePageState extends State<_ProfilePage> {
-  final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  bool _isSignUp = false;
-  bool _isSubmitting = false;
-  bool _obscurePassword = true;
-  String? _message;
-
-  @override
-  void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-    setState(() {
-      _isSubmitting = true;
-      _message = null;
-    });
-
-    try {
-      final auth = Supabase.instance.client.auth;
-      if (_isSignUp) {
-        final response = await auth.signUp(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
-        );
-        if (!mounted) return;
-        setState(() {
-          _message = response.session == null
-              ? 'Check your email to confirm your new account.'
-              : 'Your account is ready.';
-        });
-      } else {
-        final response = await auth.signInWithPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
-        );
-        if (!mounted) return;
-        if (response.session == null || auth.currentSession == null) {
-          setState(() {
-            _message =
-                'Supabase did not create a sign-in session. Confirm the account email, then try again.';
-          });
-        }
-      }
-    } on AuthException catch (error) {
-      if (mounted) setState(() => _message = error.message);
-    } catch (_) {
-      if (mounted) {
-        setState(() => _message = 'Could not reach the account service.');
-      }
-    } finally {
-      if (mounted) setState(() => _isSubmitting = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_isSupabaseConfigured) return const _SupabaseSetupNotice();
-
-    return StreamBuilder<AuthState>(
-      stream: Supabase.instance.client.auth.onAuthStateChange,
-      builder: (context, _) {
-        final auth = Supabase.instance.client.auth;
-        final user = auth.currentUser;
-        if (user != null && auth.currentSession != null) {
-          return _SignedInProfile(
-            user: user,
-            onStationLocationTrackingChanged:
-                widget.onStationLocationTrackingChanged,
-          );
-        }
-
-        return SafeArea(
-          child: ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              const Icon(Icons.account_circle, size: 72),
-              const SizedBox(height: 16),
-              Text(
-                _isSignUp ? 'Create an account' : 'Welcome back',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _isSignUp
-                    ? 'Save your preferences and access them on any device.'
-                    : 'Sign in to manage your JomRide account.',
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 32),
-              Form(
-                key: _formKey,
-                child: Column(
-                  children: [
-                    TextFormField(
-                      controller: _emailController,
-                      keyboardType: TextInputType.emailAddress,
-                      autofillHints: const [AutofillHints.email],
-                      decoration: const InputDecoration(
-                        labelText: 'Email address',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (value) {
-                        if (value == null || !value.contains('@')) {
-                          return 'Enter a valid email address.';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    TextFormField(
-                      controller: _passwordController,
-                      obscureText: _obscurePassword,
-                      autofillHints: [
-                        _isSignUp
-                            ? AutofillHints.newPassword
-                            : AutofillHints.password,
-                      ],
-                      decoration: InputDecoration(
-                        labelText: 'Password',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          tooltip: _obscurePassword
-                              ? 'Show password'
-                              : 'Hide password',
-                          icon: Icon(
-                            _obscurePassword
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                          ),
-                          onPressed: () => setState(
-                            () => _obscurePassword = !_obscurePassword,
-                          ),
-                        ),
-                      ),
-                      validator: (value) {
-                        if (value == null || value.length < 6) {
-                          return 'Password must contain at least 6 characters.';
-                        }
-                        return null;
-                      },
-                      onFieldSubmitted: (_) => _submit(),
-                    ),
-                  ],
-                ),
-              ),
-              if (_message != null) ...[
-                const SizedBox(height: 16),
-                Text(
-                  _message!,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color:
-                        _message!.startsWith('Could') ||
-                            _message!.startsWith('Invalid')
-                        ? Theme.of(context).colorScheme.error
-                        : Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: _isSubmitting ? null : _submit,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(_isSignUp ? 'Sign up' : 'Sign in'),
-                ),
-              ),
-              TextButton(
-                onPressed: _isSubmitting
-                    ? null
-                    : () => setState(() {
-                        _isSignUp = !_isSignUp;
-                        _message = null;
-                      }),
-                child: Text(
-                  _isSignUp
-                      ? 'Already have an account? Sign in'
-                      : 'New to JomRide? Sign up',
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _SignedInProfile extends StatefulWidget {
-  const _SignedInProfile({
-    required this.user,
-    required this.onStationLocationTrackingChanged,
-  });
-
-  final User user;
-  final ValueChanged<bool> onStationLocationTrackingChanged;
-
-  @override
-  State<_SignedInProfile> createState() => _SignedInProfileState();
-}
-
-class _SignedInProfileState extends State<_SignedInProfile> {
-  bool _isSavingLocationTracking = false;
-  bool _isSavingAccessibility = false;
-  late String _accessibilityMode;
-
-  @override
-  void initState() {
-    super.initState();
-    _accessibilityMode =
-        widget.user.userMetadata?['accessibility_mode']?.toString() ??
-        'standard';
-  }
-
-  bool get _locationTrackingEnabled =>
-      widget.user.userMetadata?['station_location_tracking'] == true;
-
-  Future<void> _setLocationTrackingEnabled(bool enabled) async {
-    setState(() => _isSavingLocationTracking = true);
-    try {
-      final metadata = Map<String, dynamic>.from(
-        widget.user.userMetadata ?? {},
-      );
-      metadata['station_location_tracking'] = enabled;
-      await Supabase.instance.client.auth.updateUser(
-        UserAttributes(data: metadata),
-      );
-      widget.onStationLocationTrackingChanged(enabled);
-    } on AuthException catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(error.message)));
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not save the tracking preference.'),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSavingLocationTracking = false);
-    }
-  }
-
-  Future<void> _setAccessibilityMode(String? mode) async {
-    if (mode == null || mode == _accessibilityMode) return;
-    final previous = _accessibilityMode;
-    setState(() {
-      _accessibilityMode = mode;
-      _isSavingAccessibility = true;
-    });
-    try {
-      final metadata = Map<String, dynamic>.from(
-        widget.user.userMetadata ?? {},
-      );
-      metadata['accessibility_mode'] = mode;
-      await Supabase.instance.client.auth.updateUser(
-        UserAttributes(data: metadata),
-      );
-    } on AuthException catch (error) {
-      if (mounted) {
-        setState(() => _accessibilityMode = previous);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(error.message)));
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _accessibilityMode = previous);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not save the accessibility preference.'),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSavingAccessibility = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Icon(Icons.account_circle, size: 72),
-            const SizedBox(height: 16),
-            Text(
-              'You are signed in',
-              textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              widget.user.email ?? 'JomRide account',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.location_searching),
-              title: const Text('Station location tracking'),
-              subtitle: const Text(
-                'Ask which nearby station or stop you are at when an interchange has stops within 20 metres.',
-              ),
-              value: _locationTrackingEnabled,
-              onChanged: _isSavingLocationTracking
-                  ? null
-                  : _setLocationTrackingEnabled,
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              value: _accessibilityMode,
-              decoration: const InputDecoration(
-                labelText: 'Walking accessibility preference',
-                helperText:
-                    'Changes route ranking and walking-time estimates. Stair-free access is not verified.',
-                border: OutlineInputBorder(),
-              ),
-              items: const [
-                DropdownMenuItem(
-                  value: 'standard',
-                  child: Text('Standard walking'),
-                ),
-                DropdownMenuItem(
-                  value: 'avoid_stairs',
-                  child: Text('Avoid stairs'),
-                ),
-                DropdownMenuItem(
-                  value: 'step_free',
-                  child: Text('Step-free estimate'),
-                ),
-              ],
-              onChanged: _isSavingAccessibility ? null : _setAccessibilityMode,
-            ),
-            const Spacer(),
-            OutlinedButton.icon(
-              onPressed: () => Supabase.instance.client.auth.signOut(),
-              icon: const Icon(Icons.logout),
-              label: const Text('Sign out'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SupabaseSetupNotice extends StatelessWidget {
-  const _SupabaseSetupNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.lock_outline, size: 64),
-            const SizedBox(height: 20),
-            Text(
-              'Account sign-in is being set up',
-              textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Add this app\'s Supabase URL and publishable key when building the app to enable sign-in and sign-up.',
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _UnsupportedZoneScreen extends StatelessWidget {
-  const _UnsupportedZoneScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.map_outlined,
-                size: 72,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(height: 24),
-              Text(
-                'You are outside of supported zone',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'JomRide currently supports only the Klang Valley map area.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyLarge,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class Itinerary {
-  const Itinerary({
-    required this.duration,
-    required this.legs,
-    this.fallbackMessage,
-    this.fareAmount,
-    this.fareLabel,
-    this.fareMin,
-    this.fareMax,
-    this.congestion,
-  });
-
-  factory Itinerary.fromJson(Map<String, dynamic> json) {
-    final rawLegs = json['legs'];
-    final fallback = json['fallback'];
-    final fare = json['fare'];
-    return Itinerary(
-      duration: json['duration'] is num ? json['duration'] as num : 0,
-      legs: rawLegs is List
-          ? rawLegs
-                .whereType<Map>()
-                .map(
-                  (leg) =>
-                      ItineraryLeg.fromJson(Map<String, dynamic>.from(leg)),
-                )
-                .toList()
-          : const [],
-      fallbackMessage:
-          json['fallbackMessage']?.toString() ??
-          (fallback is Map ? fallback['message']?.toString() : null),
-      fareAmount: fare is Map && fare['amount'] is num
-          ? (fare['amount'] as num).toDouble()
-          : null,
-      fareLabel: fare is Map ? fare['label']?.toString() : null,
-      fareMin: json['fareMin'] is num
-          ? (json['fareMin'] as num).toDouble()
-          : null,
-      fareMax: json['fareMax'] is num
-          ? (json['fareMax'] as num).toDouble()
-          : null,
-      congestion: json['congestion'] is Map
-          ? Map<String, dynamic>.from(json['congestion'] as Map)
-          : null,
-    );
-  }
-
-  final num duration;
-  final List<ItineraryLeg> legs;
-  final String? fallbackMessage;
-  final double? fareAmount;
-  final String? fareLabel;
-  final double? fareMin;
-  final double? fareMax;
-  final Map<String, dynamic>? congestion;
-}
-
-class ItineraryLeg {
-  const ItineraryLeg({
-    required this.mode,
-    required this.startTime,
-    required this.endTime,
-    this.routeShortName,
-    this.headsign,
-    this.fromPlace,
-    this.toPlace,
-    this.isSheltered = false,
-    this.isTransferWalk = false,
-    this.isNearestStationAccess = false,
-    this.paymentMethod,
-    this.liveBusEstimate,
-    this.intermediateStops = const [],
-    this.incidentReports = const [],
-  });
-
-  factory ItineraryLeg.fromJson(Map<String, dynamic> json) {
-    final from = json['from'];
-    final to = json['to'];
-    return ItineraryLeg(
-      mode: json['mode']?.toString() ?? 'UNKNOWN',
-      startTime: _legTime(
-        json['startTime'],
-        from is Map ? from['departure'] ?? from['scheduledDeparture'] : null,
-      ),
-      endTime: _legTime(
-        json['endTime'],
-        to is Map ? to['arrival'] ?? to['scheduledArrival'] : null,
-      ),
-      routeShortName: json['routeShortName']?.toString(),
-      headsign: json['headsign']?.toString(),
-      fromPlace: ItineraryPlace.fromJsonOrNull(json['from']),
-      toPlace: ItineraryPlace.fromJsonOrNull(json['to']),
-      isSheltered: json['isSheltered'] == true,
-      isTransferWalk: json['isTransferWalk'] == true,
-      isNearestStationAccess: json['isNearestStationAccess'] == true,
-      paymentMethod: json['paymentMethod']?.toString(),
-      liveBusEstimate: LiveBusEstimate.fromJsonOrNull(json['liveBusEstimate']),
-      intermediateStops: _intermediateStopsFromJson(json['intermediateStops']),
-      incidentReports: _legIncidentsFromJson(json['incidentReports']),
-    );
-  }
-
-  final String mode;
-  final String startTime;
-  final String endTime;
-  final String? routeShortName;
-  final String? headsign;
-  final ItineraryPlace? fromPlace;
-  final ItineraryPlace? toPlace;
-  final bool isSheltered;
-  final bool isTransferWalk;
-  final bool isNearestStationAccess;
-  final String? paymentMethod;
-  final LiveBusEstimate? liveBusEstimate;
-  final List<IntermediateStop> intermediateStops;
-  final List<LegIncident> incidentReports;
-
-  static String _legTime(dynamic primary, dynamic fallback) {
-    final value = primary ?? fallback;
-    return value?.toString() ?? '';
-  }
-}
-
-class LegIncident {
-  const LegIncident({
-    required this.stationName,
-    required this.type,
-    this.route,
-  });
-
-  factory LegIncident.fromJson(Map<String, dynamic> json) => LegIncident(
-    stationName: json['stationName']?.toString() ?? 'Affected station',
-    type: json['type']?.toString() ?? 'disruption',
-    route: json['route']?.toString(),
-  );
-
-  final String stationName;
-  final String type;
-  final String? route;
-
-  String get label => _incidentLabel(type, route);
-}
-
-class LiveBusEstimate {
-  const LiveBusEstimate({
-    required this.timestamp,
-    required this.trafficAdjusted,
-  });
-
-  static LiveBusEstimate? fromJsonOrNull(dynamic value) {
-    if (value is! Map || value['timestamp'] is! num) return null;
-    return LiveBusEstimate(
-      timestamp: (value['timestamp'] as num).toInt(),
-      trafficAdjusted: value['trafficAdjusted'] == true,
-    );
-  }
-
-  String get minutesRemaining {
-    final seconds = (DateTime.fromMillisecondsSinceEpoch(
-      timestamp,
-    ).difference(DateTime.now()).inSeconds).clamp(0, 7200);
-    if (seconds < 60) return 'due now';
-    return 'in ${(seconds / 60).ceil()} min';
-  }
-
-  final int timestamp;
-  final bool trafficAdjusted;
-}
-
-class ItineraryPlace {
-  const ItineraryPlace({required this.name, this.lat, this.lon});
-
-  static ItineraryPlace? fromJsonOrNull(dynamic value) {
-    if (value is! Map || value['name'] == null) return null;
-    return ItineraryPlace(
-      name: value['name'].toString(),
-      lat: value['lat'] is num ? (value['lat'] as num).toDouble() : null,
-      lon: value['lon'] is num ? (value['lon'] as num).toDouble() : null,
-    );
-  }
-
-  final String name;
-  final double? lat;
-  final double? lon;
-}
-
-List<IntermediateStop> _intermediateStopsFromJson(dynamic value) {
-  if (value is! List) return const [];
-  return value
-      .whereType<Map>()
-      .map((stop) => IntermediateStop.fromJson(Map<String, dynamic>.from(stop)))
-      .toList();
-}
-
-List<LegIncident> _legIncidentsFromJson(dynamic value) {
-  if (value is! List) return const [];
-  return value
-      .whereType<Map>()
-      .map(
-        (incident) => LegIncident.fromJson(Map<String, dynamic>.from(incident)),
-      )
-      .toList();
-}
-
-class IntermediateStop {
-  const IntermediateStop({
-    required this.name,
-    required this.lat,
-    required this.lon,
-  });
-
-  factory IntermediateStop.fromJson(Map<String, dynamic> json) {
-    return IntermediateStop(
-      name: json['name']?.toString() ?? 'Unnamed stop',
-      lat: json['lat'] is num ? (json['lat'] as num).toDouble() : 0,
-      lon: json['lon'] is num ? (json['lon'] as num).toDouble() : 0,
-    );
-  }
-
-  final String name;
-  final double lat;
-  final double lon;
-}
-
-enum _IncidentType {
-  stuckTrain(
-    'Stuck train for over 5 minutes',
-    'A train has been stationary longer than expected.',
-    Icons.train,
-    false,
-  ),
-  crowding(
-    'Crowding',
-    'The platform, station or vehicle is unusually crowded.',
-    Icons.groups,
-    false,
-  ),
-  disruption(
-    'Service disruption',
-    'There is a delay, closure or other service issue.',
-    Icons.warning_amber_rounded,
-    false,
-  ),
-  safety(
-    'Safety or accessibility issue',
-    'Report a safety concern or an accessibility obstruction.',
-    Icons.accessible,
-    false,
-  ),
-  busNotArrived(
-    'Bus has not arrived for over 10 minutes',
-    'Report an overdue bus for the selected route.',
-    Icons.schedule,
-    true,
-  ),
-  busCrowding(
-    'Bus crowding',
-    'The selected bus is unusually crowded.',
-    Icons.groups,
-    true,
-  ),
-  busBreakdown(
-    'Bus breakdown or service issue',
-    'The selected bus is not operating normally.',
-    Icons.build_circle_outlined,
-    true,
-  ),
-  busSafety(
-    'Bus safety or accessibility issue',
-    'Report a safety concern or accessibility obstruction.',
-    Icons.accessible,
-    true,
-  );
-
-  const _IncidentType(this.label, this.description, this.icon, this.isBus);
-
-  final String label;
-  final String description;
-  final IconData icon;
-  final bool isBus;
-}
-
-class _TimedCache<T> {
-  _TimedCache(this.value) : loadedAt = DateTime.now();
-
-  final T value;
-  final DateTime loadedAt;
-}
-
-class _TransitStation {
-  const _TransitStation({
-    required this.id,
-    required this.name,
-    required this.lat,
-    required this.lon,
-  });
-
-  static _TransitStation? fromGeoJson(Map feature) {
-    final properties = feature['properties'];
-    final geometry = feature['geometry'];
-    if (properties is! Map || geometry is! Map) return null;
-    if (properties['transit_type']?.toString() != 'rail') return null;
-    final coordinates = geometry['coordinates'];
-    if (coordinates is! List || coordinates.length < 2) return null;
-    final lon = coordinates[0];
-    final lat = coordinates[1];
-    if (lon is! num || lat is! num || properties['id'] == null) return null;
-    return _TransitStation(
-      id: properties['id'].toString(),
-      name: properties['name']?.toString() ?? 'Rail station',
-      lat: lat.toDouble(),
-      lon: lon.toDouble(),
-    );
-  }
-
-  final String id;
-  final String name;
-  final double lat;
-  final double lon;
-}
-
-class _TransitStop {
-  const _TransitStop({
-    required this.id,
-    required this.name,
-    required this.lat,
-    required this.lon,
-    required this.transitType,
-    required this.routes,
-  });
-
-  static _TransitStop? fromGeoJson(Map feature) {
-    final properties = feature['properties'];
-    final geometry = feature['geometry'];
-    if (properties is! Map || geometry is! Map) return null;
-    final coordinates = geometry['coordinates'];
-    if (coordinates is! List || coordinates.length < 2) return null;
-    final lon = coordinates[0];
-    final lat = coordinates[1];
-    if (lon is! num || lat is! num || properties['id'] == null) return null;
-    return _TransitStop(
-      id: properties['id'].toString(),
-      name: properties['name']?.toString() ?? 'Transit stop',
-      lat: lat.toDouble(),
-      lon: lon.toDouble(),
-      transitType: properties['transit_type']?.toString() ?? 'bus',
-      routes: properties['routes']?.toString() ?? '',
-    );
-  }
-
-  PlaceSearchResult asPlaceSearchResult() => PlaceSearchResult(
-    name: name,
-    address: 'Selected transit stop',
-    lat: lat,
-    lon: lon,
-    stopId: id,
-  );
-
-  final String id;
-  final String name;
-  final double lat;
-  final double lon;
-  final String transitType;
-  final String routes;
-}
-
-class PlaceSearchResult {
-  const PlaceSearchResult({
-    required this.name,
-    required this.address,
-    required this.lat,
-    required this.lon,
-    this.stopId,
-  });
-
-  factory PlaceSearchResult.fromJson(Map<String, dynamic> json) {
-    return PlaceSearchResult(
-      name: json['name']?.toString() ?? 'Selected location',
-      address: json['address']?.toString() ?? '',
-      lat: json['lat'] is num ? (json['lat'] as num).toDouble() : 0,
-      lon: json['lon'] is num ? (json['lon'] as num).toDouble() : 0,
-      stopId: json['stop_id']?.toString(),
-    );
-  }
-
-  final String name;
-  final String address;
-  final double lat;
-  final double lon;
-  final String? stopId;
-}
-
-class StopDeparture {
-  const StopDeparture({
-    required this.route,
-    required this.time,
-    required this.timestamp,
-    required this.isEstimated,
-    required this.direction,
-  });
-
-  factory StopDeparture.fromJson(Map<String, dynamic> json) {
-    return StopDeparture(
-      route: json['route']?.toString() ?? 'Transit service',
-      time: json['time']?.toString() ?? '--:--',
-      timestamp: json['timestamp'] is num
-          ? (json['timestamp'] as num).toInt()
-          : 0,
-      isEstimated: json['is_estimated'] == true,
-      // FastAPI returns the GTFS terminal under `terminal` and only provides
-      // scheduled times. Retain the older name for compatibility.
-      direction:
-          json['terminal']?.toString() ?? json['direction']?.toString() ?? '',
-    );
-  }
-
-  final String route;
-  final String time;
-  final int timestamp;
-  final bool isEstimated;
-  final String direction;
-
-  String get displayDirection {
-    var destination = direction.trim();
-    final lowerCase = destination.toLowerCase();
-    if (lowerCase.startsWith('from ')) {
-      final toIndex = lowerCase.indexOf(' to ');
-      if (toIndex >= 0) destination = destination.substring(toIndex + 4).trim();
-    }
-    if (destination.toLowerCase().startsWith('to ')) {
-      destination = destination.substring(3).trim();
-    }
-    return destination.isEmpty ? '' : 'To $destination';
-  }
-
-  String get minutesRemaining {
-    if (timestamp <= 0) return 'Arriving soon';
-    final secondsRemaining = DateTime.fromMillisecondsSinceEpoch(
-      timestamp,
-    ).difference(DateTime.now()).inSeconds;
-    if (secondsRemaining <= 60) return '< 1 min';
-    return '${(secondsRemaining / 60).ceil()} min away';
-  }
-}
-
-class _TrafficCongestion {
-  const _TrafficCongestion({
-    required this.level,
-    required this.roadLevel,
-    required this.currentSpeedKph,
-    required this.freeFlowSpeedKph,
-    required this.delayPercent,
-    this.observedUsers,
-    this.capacity,
-    this.stationLevel,
-  });
-
-  factory _TrafficCongestion.fromJson(Map<String, dynamic> json) {
-    return _TrafficCongestion(
-      level: json['level']?.toString() ?? 'unavailable',
-      roadLevel:
-          json['roadLevel']?.toString() ??
-          json['level']?.toString() ??
-          'unavailable',
-      currentSpeedKph: (json['currentSpeedKph'] as num?)?.toDouble() ?? 0,
-      freeFlowSpeedKph: (json['freeFlowSpeedKph'] as num?)?.toDouble() ?? 0,
-      delayPercent: (json['delayPercent'] as num?)?.toDouble(),
-      observedUsers:
-          json['stationPresence'] is Map &&
-              (json['stationPresence'] as Map)['observedUsers'] is num
-          ? ((json['stationPresence'] as Map)['observedUsers'] as num).toInt()
-          : null,
-      capacity:
-          json['stationPresence'] is Map &&
-              (json['stationPresence'] as Map)['capacity'] is num
-          ? ((json['stationPresence'] as Map)['capacity'] as num).toInt()
-          : null,
-      stationLevel: json['stationPresence'] is Map
-          ? (json['stationPresence'] as Map)['level']?.toString()
-          : null,
-    );
-  }
-
-  final String level;
-  final String roadLevel;
-  final double currentSpeedKph;
-  final double freeFlowSpeedKph;
-  final double? delayPercent;
-  final int? observedUsers;
-  final int? capacity;
-  final String? stationLevel;
-
-  String get label {
-    if (roadLevel == 'road_closed') return 'TomTom traffic: nearby road closed';
-    final roadStatus = switch (roadLevel) {
-      'heavy' => 'Heavy traffic',
-      'moderate' => 'Moderate traffic',
-      'low' => 'Light traffic',
-      _ => 'Traffic unavailable',
-    };
-    final delay = delayPercent == null
-        ? ''
-        : ' • ${delayPercent!.round()}% slower';
-    final presence = observedUsers == null
-        ? ''
-        : capacity == null
-        ? ' • $observedUsers recent station users'
-        : ' • Station ${stationLevel ?? 'occupancy'}: $observedUsers/$capacity';
-    return 'Congestion Status: $roadStatus • ${currentSpeedKph.round()} km/h$delay$presence';
-  }
-}
-
-class _StationCrowd {
-  const _StationCrowd({required this.level});
-
-  factory _StationCrowd.fromJson(Map<String, dynamic> json) {
-    return _StationCrowd(level: json['level']?.toString() ?? 'unavailable');
-  }
-
-  final String level;
-
-  String get label => switch (level) {
-    'high' => 'High crowd level',
-    'medium' => 'Medium crowd level',
-    'low' => 'Low crowd level',
-    _ => 'Low crowd level',
-  };
-}
-
-class StationIncident {
-  const StationIncident({required this.type, required this.count, this.route});
-
-  factory StationIncident.fromJson(Map<String, dynamic> json) {
-    return StationIncident(
-      type: json['type']?.toString() ?? 'disruption',
-      count: json['count'] is num ? (json['count'] as num).toInt() : 1,
-      route: json['route']?.toString(),
-    );
-  }
-
-  final String type;
-  final int count;
-  final String? route;
-
-  String get label => _incidentLabel(type, route);
-}
-
-String _incidentLabel(String type, String? route) {
-  final bus = route == null || route.trim().isEmpty ? 'Bus' : 'Bus $route';
-  return switch (type) {
-    'stuckTrain' => 'Train has been stationary for over 5 minutes',
-    'missingBus' => 'Bus or BRT has not arrived for over 10 minutes',
-    'crowding' => 'Crowding reported',
-    'safety' => 'Safety or accessibility issue reported',
-    'busNotArrived' => '$bus has not arrived for over 10 minutes',
-    'busCrowding' => '$bus crowding reported',
-    'busBreakdown' => '$bus breakdown or service issue reported',
-    'busSafety' => '$bus safety or accessibility issue reported',
-    _ => 'Service disruption reported',
-  };
 }

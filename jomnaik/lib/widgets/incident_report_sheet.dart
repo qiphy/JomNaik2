@@ -42,13 +42,13 @@ class IncidentTypeSelectionSheet extends StatelessWidget {
     super.key,
     required this.isBusStop,
     required this.stopName,
-    required this.distance,
+    this.distance,
     this.affectedRoute,
   });
 
   final bool isBusStop;
   final String stopName;
-  final double distance;
+  final double? distance;
   final String? affectedRoute;
 
   @override
@@ -67,7 +67,11 @@ class IncidentTypeSelectionSheet extends StatelessWidget {
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 4),
-            Text('Reporting for $stopName • ${distance.round()} m away'),
+            Text(
+              distance != null
+                  ? 'Reporting for $stopName • ${distance!.round()} m away'
+                  : 'Reporting for $stopName',
+            ),
             const SizedBox(height: 12),
             ...IncidentType.values
                 .where((type) => type.isBus == isBusStop)

@@ -27,6 +27,8 @@ class RouteChoicesSheet extends StatelessWidget {
         return 'Mostly bus';
       case 'ehailing':
         return 'E-hailing';
+      case 'hybrid':
+        return 'E-hailing + transit';
     }
     final modes = _itineraryLegs(itinerary)
         .map((leg) => leg['mode']?.toString().toUpperCase())
@@ -45,6 +47,7 @@ class RouteChoicesSheet extends StatelessWidget {
   IconData _routeOptionIcon(Map<String, dynamic> itinerary) {
     switch (_routeOptionTitle(itinerary)) {
       case 'E-hailing':
+      case 'E-hailing + transit':
         return Icons.local_taxi;
       case 'Bus':
         return Icons.directions_bus;
@@ -110,7 +113,22 @@ class RouteChoicesSheet extends StatelessWidget {
               final option = Itinerary.fromJson(itinerary);
               return Card(
                 child: ListTile(
-                  leading: Icon(_routeOptionIcon(itinerary)),
+                  leading: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(_routeOptionIcon(itinerary)),
+                      if (option.legs.any(
+                        (leg) => leg.incidentReports.isNotEmpty,
+                      )) ...[
+                        const SizedBox(width: 4),
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          color: Colors.orange,
+                          size: 20,
+                        ),
+                      ],
+                    ],
+                  ),
                   title: Text(_routeOptionTitle(itinerary)),
                   subtitle: Text(_routeOptionSummary(itinerary)),
                   trailing: Column(

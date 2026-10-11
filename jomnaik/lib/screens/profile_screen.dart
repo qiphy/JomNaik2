@@ -234,6 +234,16 @@ class SignedInProfile extends StatefulWidget {
 
 class _SignedInProfileState extends State<SignedInProfile> {
   bool _isSavingLocationTracking = false;
+  bool _isSavingAccessibility = false;
+  late String _accessibilityMode;
+
+  @override
+  void initState() {
+    super.initState();
+    _accessibilityMode =
+        widget.user.userMetadata?['accessibility_mode']?.toString() ??
+        'standard';
+  }
 
   bool get _locationTrackingEnabled =>
       widget.user.userMetadata?['station_location_tracking'] == true;
@@ -268,6 +278,42 @@ class _SignedInProfileState extends State<SignedInProfile> {
     }
   }
 
+  Future<void> _setAccessibilityMode(String? mode) async {
+    if (mode == null || mode == _accessibilityMode) return;
+    final previous = _accessibilityMode;
+    setState(() {
+      _accessibilityMode = mode;
+      _isSavingAccessibility = true;
+    });
+    try {
+      final metadata = Map<String, dynamic>.from(
+        widget.user.userMetadata ?? {},
+      );
+      metadata['accessibility_mode'] = mode;
+      await Supabase.instance.client.auth.updateUser(
+        UserAttributes(data: metadata),
+      );
+    } on AuthException catch (error) {
+      if (mounted) {
+        setState(() => _accessibilityMode = previous);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _accessibilityMode = previous);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not save the accessibility preference.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSavingAccessibility = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -287,7 +333,7 @@ class _SignedInProfileState extends State<SignedInProfile> {
             ),
             const SizedBox(height: 8),
             Text(
-              widget.user.email ?? 'JomNaik account',
+              widget.user.email ?? 'JomRide account',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 32),
@@ -302,6 +348,31 @@ class _SignedInProfileState extends State<SignedInProfile> {
               onChanged: _isSavingLocationTracking
                   ? null
                   : _setLocationTrackingEnabled,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _accessibilityMode,
+              decoration: const InputDecoration(
+                labelText: 'Walking accessibility preference',
+                helperText:
+                    'Changes route ranking and walking-time estimates. Stair-free access is not verified.',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'standard',
+                  child: Text('Standard walking'),
+                ),
+                DropdownMenuItem(
+                  value: 'avoid_stairs',
+                  child: Text('Avoid stairs'),
+                ),
+                DropdownMenuItem(
+                  value: 'step_free',
+                  child: Text('Step-free estimate'),
+                ),
+              ],
+              onChanged: _isSavingAccessibility ? null : _setAccessibilityMode,
             ),
             const Spacer(),
             OutlinedButton.icon(

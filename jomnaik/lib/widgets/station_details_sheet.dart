@@ -96,87 +96,120 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: SizedBox(
-        width: double.infinity,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.stopName,
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${widget.transitType == 'rail' ? 'Rail station' : 'Bus stop'} routes',
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: widget.stop == null ? null : widget.onGetDirections,
-                  icon: const Icon(Icons.directions),
-                  label: const Text('Directions'),
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: widget.routes
-                      .split(', ')
-                      .map((route) => Chip(label: Text(route)))
-                      .toList(),
-                ),
-                const SizedBox(height: 24),
-                FutureBuilder<List<StationIncident>>(
-                  future: _incidentsFuture,
-                  builder: (context, snapshot) {
-                    final currentIncidents = snapshot.data ?? const [];
-                    if (currentIncidents.isEmpty) {
-                      return const SizedBox.shrink();
-                    }
-                    return Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.only(bottom: 20),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.shade50,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Row(
-                            children: [
-                              Icon(
-                                Icons.warning_amber_rounded,
-                                color: Colors.orange,
-                              ),
-                              SizedBox(width: 8),
-                              Text(
-                                'Recent reports',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanStart: (_) {},
+      onPanUpdate: (_) {},
+      onPanEnd: (_) {},
+      child: SafeArea(
+        child: SizedBox(
+          width: double.infinity,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.stopName,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${widget.transitType == 'rail' ? 'Rail station' : 'Bus stop'} routes',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: widget.stop == null ? null : widget.onGetDirections,
+                    icon: const Icon(Icons.directions),
+                    label: const Text('Directions'),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: widget.routes
+                        .split(', ')
+                        .map((route) => Chip(label: Text(route)))
+                        .toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  FutureBuilder<List<StationIncident>>(
+                    future: _incidentsFuture,
+                    builder: (context, snapshot) {
+                      final currentIncidents = snapshot.data ?? const [];
+                      final reportCount = currentIncidents.fold<int>(
+                        0,
+                        (total, incident) => total + incident.count,
+                      );
+                      final reportLevel = snapshot.hasError
+                          ? 'Unavailable'
+                          : snapshot.connectionState != ConnectionState.done
+                              ? 'Loading'
+                              : (reportCount >= 3
+                                  ? 'High incident status'
+                                  : reportCount == 2
+                                      ? 'Medium incident status'
+                                      : 'Low incident status');
+                      final reportColor = snapshot.hasError
+                          ? Colors.blueGrey
+                          : reportCount >= 3
+                              ? Colors.red
+                              : reportCount == 2
+                                  ? Colors.orange
+                                  : Colors.green;
+                      final reportMessage = snapshot.hasError
+                          ? 'Incident report level unavailable.'
+                          : snapshot.connectionState != ConnectionState.done
+                              ? 'Loading recent reports…'
+                              : reportCount == 0
+                                  ? 'No reports in the last 15 minutes.'
+                                  : '$reportCount recent report${reportCount == 1 ? '' : 's'}';
+                      return Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 20),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: reportColor.shade50,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.warning_amber_rounded,
+                                  color: reportColor,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Incident report level: $reportLevel',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(reportMessage),
+                            if (currentIncidents.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              ...currentIncidents.map(
+                                (incident) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 4),
+                                  child: Text(
+                                    '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
+                                  ),
                                 ),
                               ),
                             ],
-                          ),
-                          const SizedBox(height: 8),
-                          ...currentIncidents.map(
-                            (incident) => Padding(
-                              padding: const EdgeInsets.only(bottom: 4),
-                              child: Text(
-                                '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
                 FutureBuilder<TrafficCongestion?>(
                   future: _congestionFuture,
                   builder: (context, snapshot) {
@@ -288,7 +321,8 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                     );
                   },
                 ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

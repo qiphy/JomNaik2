@@ -5,6 +5,8 @@ class Itinerary {
     this.fallbackMessage,
     this.fareAmount,
     this.fareLabel,
+    this.fareMin,
+    this.fareMax,
     this.congestion,
   });
 
@@ -30,6 +32,12 @@ class Itinerary {
           ? (fare['amount'] as num).toDouble()
           : null,
       fareLabel: fare is Map ? fare['label']?.toString() : null,
+      fareMin: json['fareMin'] is num
+          ? (json['fareMin'] as num).toDouble()
+          : null,
+      fareMax: json['fareMax'] is num
+          ? (json['fareMax'] as num).toDouble()
+          : null,
       congestion: json['congestion'] is Map
           ? Map<String, dynamic>.from(json['congestion'] as Map)
           : null,
@@ -41,6 +49,8 @@ class Itinerary {
   final String? fallbackMessage;
   final double? fareAmount;
   final String? fareLabel;
+  final double? fareMin;
+  final double? fareMax;
   final Map<String, dynamic>? congestion;
 }
 

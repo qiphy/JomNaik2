@@ -14,6 +14,12 @@ String fareLabel(Itinerary itinerary) {
   return fare == null ? '' : 'RM${fare.toStringAsFixed(2)}';
 }
 
+String incidentStatusLabel(int count) {
+  if (count >= 3) return 'High incident status';
+  if (count == 2) return 'Medium incident status';
+  return 'Low incident status';
+}
+
 String formatTime(String rawTimestamp) {
   if (rawTimestamp.isEmpty) return '--:--';
 

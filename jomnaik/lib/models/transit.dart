@@ -272,3 +272,40 @@ enum IncidentType {
   final IconData icon;
   final bool isBus;
 }
+
+class StationCrowd {
+  const StationCrowd({
+    required this.level,
+    this.stationId = '',
+    this.observedUsers = 0,
+    this.capacity = 0,
+  });
+
+  factory StationCrowd.fromJson(Map<String, dynamic> json) {
+    return StationCrowd(
+      level: json['level']?.toString() ?? 'unavailable',
+      stationId: json['station_id']?.toString() ?? '',
+      observedUsers: (json['observed_users'] as num?)?.toInt() ?? 0,
+      capacity: (json['capacity'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String level;
+  final String stationId;
+  final int observedUsers;
+  final int capacity;
+
+  String get label => switch (level) {
+    'high' => 'High crowd level',
+    'medium' => 'Medium crowd level',
+    'low' => 'Low crowd level',
+    _ => 'Low crowd level',
+  };
+}
+
+class TimedCache<T> {
+  TimedCache(this.value) : loadedAt = DateTime.now();
+
+  final T value;
+  final DateTime loadedAt;
+}
