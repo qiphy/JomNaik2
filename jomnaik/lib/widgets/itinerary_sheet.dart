@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import '../models/itinerary.dart';
 import '../utils/formatters.dart';
@@ -13,6 +14,7 @@ class ItinerarySheet extends StatelessWidget {
     required this.onDismiss,
     required this.onFindApps,
     this.onUserInteracted,
+    this.onCardInteractionChanged,
   });
 
   final Itinerary itinerary;
@@ -22,6 +24,7 @@ class ItinerarySheet extends StatelessWidget {
   final VoidCallback onDismiss;
   final VoidCallback onFindApps;
   final VoidCallback? onUserInteracted;
+  final ValueChanged<bool>? onCardInteractionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -39,17 +42,28 @@ class ItinerarySheet extends StatelessWidget {
           },
           child: NotificationListener<ScrollNotification>(
             onNotification: (notification) {
-              if (notification is ScrollStartNotification &&
-                  notification.dragDetails != null) {
-                onUserInteracted?.call();
+              if (notification is ScrollStartNotification ||
+                  notification is UserScrollNotification) {
+                onCardInteractionChanged?.call(true);
+                if (notification is ScrollStartNotification &&
+                    notification.dragDetails != null) {
+                  onUserInteracted?.call();
+                }
+              } else if (notification is ScrollEndNotification) {
+                onCardInteractionChanged?.call(false);
               }
               return false;
             },
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onPanStart: (_) {},
-              onPanUpdate: (_) {},
-              onPanEnd: (_) {},
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) => onCardInteractionChanged?.call(true),
+              onPointerUp: (_) => onCardInteractionChanged?.call(false),
+              onPointerCancel: (_) => onCardInteractionChanged?.call(false),
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent) {
+                  onCardInteractionChanged?.call(true);
+                }
+              },
               child: Container(
                 decoration: const BoxDecoration(
                   color: Colors.white,
@@ -171,26 +185,68 @@ class ItinerarySheet extends StatelessWidget {
                     }
 
                     if (isHail) {
-                      return ListTile(
-                        leading: const Icon(
-                          Icons.local_taxi,
-                          color: Colors.orange,
+                      final colorScheme = Theme.of(context).colorScheme;
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 4,
                         ),
-                        title: Text(
-                          leg.routeShortName ?? 'E-hailing estimate',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Text(
-                          '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)} • ${fareLabel(itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(itinerary)} planning estimate (RM1–RM3/km; excludes surge and tolls)\nPayment: ${leg.paymentMethod ?? 'Pay in the e-hailing app'}',
-                        ),
-                        trailing: TextButton.icon(
-                          onPressed: onFindApps,
-                          icon: const Icon(Icons.open_in_new, size: 16),
-                          label: Text(
-                            defaultTargetPlatform == TargetPlatform.iOS
-                                ? 'App Store'
-                                : 'Play Store',
+                        decoration: BoxDecoration(
+                          color: colorScheme.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.orange.withValues(alpha: 0.3),
                           ),
+                        ),
+                        child: ListTile(
+                          leading: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.15),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.local_taxi,
+                              color: Colors.orange,
+                              size: 24,
+                            ),
+                          ),
+                          title: Text(
+                            leg.routeShortName ?? 'E-hailing estimate',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)} • ${fareLabel(itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(itinerary)} (RM1–RM3/km)',
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Car route • ${leg.paymentMethod ?? 'Pay in the e-hailing app'}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: colorScheme.outline,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          trailing: FilledButton.tonalIcon(
+                            onPressed: onFindApps,
+                            style: FilledButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                            ),
+                            icon: const Icon(Icons.open_in_new, size: 16),
+                            label: const Text('Use E-hailing'),
+                          ),
+                          onTap: onFindApps,
                         ),
                       );
                     }

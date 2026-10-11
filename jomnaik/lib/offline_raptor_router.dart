@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:math' as math;
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 
@@ -256,13 +255,13 @@ class OfflineRaptorRouter {
       final stop = stops[preferredId] as List;
       final stopLat = (stop[1] as num).toDouble();
       final stopLon = (stop[2] as num).toDouble();
+      final dist = _distance(lat, lon, stopLat, stopLon);
       choices.add(
         _NearbyStop(
           preferredId,
-          math.max(
-            30,
-            (_distance(lat, lon, stopLat, stopLon) / walkingSpeed).round(),
-          ),
+          dist > 1000
+              ? math.max(300, (dist / 9.7).round() + 180)
+              : math.max(30, (dist / walkingSpeed).round()),
         ),
       );
       // A tapped transit stop is an explicit destination/origin. Do not
@@ -284,7 +283,9 @@ class OfflineRaptorRouter {
         choices.add(
           _NearbyStop(
             entry.key,
-            math.max(30, (distance / walkingSpeed).round()),
+            distance > 1000
+                ? math.max(300, (distance / 9.7).round() + 180)
+                : math.max(30, (distance / walkingSpeed).round()),
           ),
         );
       }
@@ -319,9 +320,14 @@ class OfflineRaptorRouter {
 
         // If the next departure is more than 45 minutes away, do not wait on the platform
         if (departure != null &&
-            departure - label.arrival <= _maximumTransitWaitSeconds &&
-            (boarding == null || departure < boarding.departure)) {
-          boarding = _Boarding(index, departure, label);
+            departure - label.arrival <= _maximumTransitWaitSeconds) {
+          final offset = departure - call.departure;
+          final currentOffset = boarding == null
+              ? null
+              : boarding.departure - trip.calls[boarding.index].departure;
+          if (currentOffset == null || offset < currentOffset) {
+            boarding = _Boarding(index, departure, label);
+          }
         }
       }
       if (boarding == null || index <= boarding.index) continue;
@@ -445,7 +451,29 @@ class OfflineRaptorRouter {
     final routes = Map<String, dynamic>.from(data['routes'] as Map);
     final legs = <Map<String, dynamic>>[];
 
-    if (label.initialWalkSeconds > 0) {
+    final initialStopData = stops[label.initialStop] as List?;
+    final initialDistance = initialStopData != null && initialStopData.length >= 3
+        ? _distance(
+            fromLat,
+            fromLon,
+            (initialStopData[1] as num).toDouble(),
+            (initialStopData[2] as num).toDouble(),
+          )
+        : 0.0;
+
+    if (initialDistance > 1000) {
+      final hailSeconds = math.max(300, (initialDistance / 9.7).round() + 180);
+      legs.add({
+        'mode': 'HAIL',
+        'startTime': _iso(departure, startSeconds),
+        'endTime': _iso(departure, startSeconds + hailSeconds),
+        'routeShortName': 'E-hailing to nearest stop',
+        'paymentMethod': 'Pay in the e-hailing app',
+        'isFirstMile': true,
+        'from': {'name': 'Start', 'lat': fromLat, 'lon': fromLon},
+        'to': _place(label.initialStop, stops),
+      });
+    } else if (label.initialWalkSeconds > 0) {
       legs.add(
         _walkLeg(
           departure,
@@ -533,7 +561,21 @@ class OfflineRaptorRouter {
       toLat,
       toLon,
     );
-    if (finalWalk <= 1000 && finalWalk > 20) {
+    if (finalWalk > 1000) {
+      // If the destination is more than 1km from the last transit stop,
+      // change the final stretch to use a car route and e-hailing.
+      final hailSeconds = math.max(300, (finalWalk / 9.7).round() + 180);
+      legs.add({
+        'mode': 'HAIL',
+        'startTime': _iso(departure, lastArrival),
+        'endTime': _iso(departure, lastArrival + hailSeconds),
+        'routeShortName': 'E-hailing from nearest stop',
+        'paymentMethod': 'Pay in the e-hailing app',
+        'isLastMile': true,
+        'from': _place(last, stops),
+        'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
+      });
+    } else if (finalWalk > 20) {
       legs.add(
         _walkLeg(
           departure,
@@ -549,23 +591,10 @@ class OfflineRaptorRouter {
           fromStop: last,
         ),
       );
-    } else if (finalWalk > 1000) {
-      // Keep the public-transport itinerary complete with a walking final
-      // mile. _lastMileEhailingAlternatives converts this leg into an
-      // optional e-hailing alternative; it must not be the only option.
-      final walkSeconds = math.max(60, (finalWalk / walkingSpeed).round());
-      legs.add({
-        'mode': 'WALK',
-        'startTime': _iso(departure, lastArrival),
-        'endTime': _iso(departure, lastArrival + walkSeconds),
-        'routeShortName': 'Walking',
-        'from': _place(last, stops),
-        'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
-      });
     }
     _mergeConsecutiveTransitLegs(legs);
     final transitModes = legs
-        .where((leg) => leg['mode'] != 'WALK')
+        .where((leg) => leg['mode'] != 'WALK' && leg['mode'] != 'HAIL')
         .map((leg) => leg['mode'])
         .toSet();
     final transitRouteIds = label.rides
@@ -586,20 +615,54 @@ class OfflineRaptorRouter {
       0,
       (total, leg) => total + _legDistanceMeters(leg),
     );
+    final hasFirstMileHail = legs.isNotEmpty && legs.first['mode'] == 'HAIL';
+    final hasLastMileHail = legs.isNotEmpty && legs.last['mode'] == 'HAIL';
+    final hasHail = hasFirstMileHail || hasLastMileHail;
+
+    double fareMin = transitModes.isNotEmpty ? 1.50 : 0.0;
+    double fareMax = transitModes.isNotEmpty ? 3.50 : 0.0;
+    for (final leg in legs) {
+      if (leg['mode'] == 'HAIL') {
+        final km = _legDistanceMeters(leg) / 1000.0;
+        fareMin += km * 1.0;
+        fareMax += km * 3.0;
+      }
+    }
+
+    final durationSeconds = legs.isEmpty
+        ? label.arrival - startSeconds
+        : (DateTime.parse(legs.last['endTime'] as String)
+              .difference(
+                DateTime.parse(legs.first['startTime'] as String),
+              )
+              .inSeconds);
+
     return {
       'itineraries': [
         {
-          'duration': legs.isEmpty
-              ? label.arrival - startSeconds
-              : (DateTime.parse(legs.last['endTime'] as String)
-                    .difference(
-                      DateTime.parse(legs.first['startTime'] as String),
-                    )
-                    .inSeconds),
-          'routeCategory': transitModes.contains('BUS') ? 'bus' : 'rail',
+          'duration': durationSeconds,
+          'routeCategory': hasHail
+              ? 'hybrid'
+              : (transitModes.contains('BUS') ? 'bus' : 'rail'),
           'transferCount': math.max(0, transitRouteIds.length - 1),
           'walkingSeconds': walkingSeconds,
           'distanceMeters': distanceMeters,
+          if (hasHail) ...{
+            'hybridFirstMile': hasFirstMileHail,
+            'hybridLastMile': hasLastMileHail,
+            'fareMin': fareMin,
+            'fareMax': fareMax,
+            'fareLabel': hasFirstMileHail && hasLastMileHail
+                ? 'Estimated first and last-mile e-hailing fare'
+                : hasLastMileHail
+                    ? 'Estimated connecting e-hailing fare'
+                    : 'Estimated first-mile e-hailing fare',
+            'optionMessage': hasFirstMileHail && hasLastMileHail
+                ? 'E-hailing to the nearest stop and from the last stop, with public transport for the main journey.'
+                : hasLastMileHail
+                    ? 'Public transport with e-hailing for the final mile because the destination is more than 1 km from the last stop.'
+                    : 'E-hailing to the nearest stop, followed by public transport. This avoids a long walk to a connecting service.',
+          },
           'fallbackMessage':
               'Offline timetable route — last-mile walking or e-hailing is '
               'included when the destination is not practical by bus.',
@@ -666,7 +729,7 @@ class OfflineRaptorRouter {
       final currentStops = current['intermediateStops'];
       previous['intermediateStops'] = [
         if (previousStops is List) ...previousStops,
-        if (previousTo is Map) previousTo,
+        previousTo,
         if (currentStops is List) ...currentStops,
       ];
       previous['endTime'] = current['endTime'];
@@ -949,7 +1012,7 @@ class OfflineRaptorRouter {
     _ => 'BUS',
   };
 
-  double _distance(double aLat, double aLon, double bLat, double bLon) {
+  static double distanceBetween(double aLat, double aLon, double bLat, double bLon) {
     final dLat = (bLat - aLat) * math.pi / 180,
         dLon = (bLon - aLon) * math.pi / 180;
     final x =
@@ -960,6 +1023,9 @@ class OfflineRaptorRouter {
             math.sin(dLon / 2);
     return 12742000 * math.asin(math.sqrt(x));
   }
+
+  double _distance(double aLat, double aLon, double bLat, double bLon) =>
+      distanceBetween(aLat, aLon, bLat, bLon);
 }
 
 class _NearbyStop {

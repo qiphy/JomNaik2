@@ -665,7 +665,7 @@ class RoutingService {
     // E-hailing: 20 min -> score ~20
     //
     // E-hailing still wins because it is substantially faster.
-    if (category == 'transit') {
+    if (category == 'transit' || category == 'hybrid') {
       score -= 120;
     }
 

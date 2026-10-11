@@ -186,13 +186,8 @@ class _MapViewState extends State<MapView> {
       if (!_isScrollingCard && mounted) {
         setState(() => _isScrollingCard = true);
       }
-      _scrollCardDebounce = Timer(const Duration(milliseconds: 300), () {
-        if (_isScrollingCard && mounted) {
-          setState(() => _isScrollingCard = false);
-        }
-      });
     } else {
-      _scrollCardDebounce = Timer(const Duration(milliseconds: 150), () {
+      _scrollCardDebounce = Timer(const Duration(milliseconds: 80), () {
         if (_isScrollingCard && mounted) {
           setState(() => _isScrollingCard = false);
         }
@@ -1450,8 +1445,10 @@ class _MapViewState extends State<MapView> {
 
   Future<void> _dismissItinerary() async {
     _itineraryRenderGeneration++;
+    _scrollCardDebounce?.cancel();
     setState(() {
       _currentItinerary = null;
+      _isScrollingCard = false;
       _isJourneyGuidanceActive = false;
       _hasBoardedGuidedTransit = false;
       _guidanceMessage = null;
@@ -1925,7 +1922,18 @@ class _MapViewState extends State<MapView> {
     final existing = routeData['itineraries'];
     if (existing is! List) return routeData;
 
-    final itineraries = List<dynamic>.from(existing);
+    // Convert any transit itineraries where access (first-mile) or
+    // egress (last-mile) walk exceeds 1km to use car route and e-hailing.
+    final convertedExisting = <Map<String, dynamic>>[];
+    for (final item in existing) {
+      if (item is Map) {
+        convertedExisting.add(
+          _convertExcessiveWalksToEhailing(Map<String, dynamic>.from(item)),
+        );
+      }
+    }
+
+    final itineraries = List<dynamic>.from(convertedExisting);
     final hasCategory = (String category) => itineraries.any(
       (itinerary) =>
           itinerary is Map &&
@@ -1955,7 +1963,7 @@ class _MapViewState extends State<MapView> {
     // journey with e-hailing at both ends when needed.
     itineraries.addAll(
       _lastMileEhailingAlternatives([
-        ...List<dynamic>.from(existing),
+        ...itineraries,
         ...firstMileAlternatives,
       ]),
     );
@@ -1969,7 +1977,183 @@ class _MapViewState extends State<MapView> {
       itineraries.add(walking);
     }
 
-    return {...routeData, 'itineraries': itineraries};
+    final uniqueItineraries = <Map<String, dynamic>>[];
+    final seenSignatures = <String>{};
+    for (final it in itineraries) {
+      if (it is! Map<String, dynamic>) continue;
+      final sig = _itinerarySignature(it);
+      if (seenSignatures.add(sig)) {
+        uniqueItineraries.add(it);
+      }
+    }
+
+    return {...routeData, 'itineraries': uniqueItineraries};
+  }
+
+  Map<String, dynamic> _convertExcessiveWalksToEhailing(
+    Map<String, dynamic> itinerary,
+  ) {
+    final category = itinerary['routeCategory']?.toString();
+    if (category == 'ehailing' || category == 'walking') {
+      return itinerary;
+    }
+    final rawLegs = itinerary['legs'];
+    if (rawLegs is! List || rawLegs.isEmpty) return itinerary;
+
+    final legs = rawLegs
+        .whereType<Map>()
+        .map((leg) => Map<String, dynamic>.from(leg))
+        .toList();
+
+    var changed = false;
+    var hybridFirstMile = itinerary['hybridFirstMile'] == true;
+    var hybridLastMile = itinerary['hybridLastMile'] == true;
+    double addedFareMin = 0.0;
+    double addedFareMax = 0.0;
+
+    // Check first mile
+    if (legs.isNotEmpty) {
+      final first = legs.first;
+      final mode = first['mode']?.toString().toUpperCase();
+      if (mode == 'WALK') {
+        final from = first['from'];
+        final to = first['to'];
+        if (from is Map &&
+            to is Map &&
+            from['lat'] is num &&
+            from['lon'] is num &&
+            to['lat'] is num &&
+            to['lon'] is num) {
+          final dist = Geolocator.distanceBetween(
+            (from['lat'] as num).toDouble(),
+            (from['lon'] as num).toDouble(),
+            (to['lat'] as num).toDouble(),
+            (to['lon'] as num).toDouble(),
+          );
+          if (dist > 1000) {
+            final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
+            final start =
+                DateTime.tryParse(first['startTime']?.toString() ?? '') ??
+                DateTime.now();
+            final end = start.add(Duration(seconds: hailSeconds));
+            legs[0] = {
+              ...first,
+              'mode': 'HAIL',
+              'startTime': start.toIso8601String(),
+              'endTime': end.toIso8601String(),
+              'routeShortName': 'E-hailing to nearest stop',
+              'paymentMethod': 'Pay in the e-hailing app',
+              'isFirstMile': true,
+            };
+            hybridFirstMile = true;
+            changed = true;
+            addedFareMin += (dist / 1000);
+            addedFareMax += (dist / 1000) * 3;
+          }
+        }
+      }
+    }
+
+    // Check last mile (the final stretch)
+    if (legs.length > 1 || (legs.isNotEmpty && !hybridFirstMile)) {
+      final last = legs.last;
+      final mode = last['mode']?.toString().toUpperCase();
+      if (mode == 'WALK') {
+        final from = last['from'];
+        final to = last['to'];
+        if (from is Map &&
+            to is Map &&
+            from['lat'] is num &&
+            from['lon'] is num &&
+            to['lat'] is num &&
+            to['lon'] is num) {
+          final dist = Geolocator.distanceBetween(
+            (from['lat'] as num).toDouble(),
+            (from['lon'] as num).toDouble(),
+            (to['lat'] as num).toDouble(),
+            (to['lon'] as num).toDouble(),
+          );
+          if (dist > 1000) {
+            final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
+            final start =
+                DateTime.tryParse(last['startTime']?.toString() ?? '') ??
+                DateTime.now();
+            final end = start.add(Duration(seconds: hailSeconds));
+            legs[legs.length - 1] = {
+              ...last,
+              'mode': 'HAIL',
+              'startTime': start.toIso8601String(),
+              'endTime': end.toIso8601String(),
+              'routeShortName': 'E-hailing from nearest stop',
+              'paymentMethod': 'Pay in the e-hailing app',
+              'isLastMile': true,
+            };
+            hybridLastMile = true;
+            changed = true;
+            addedFareMin += (dist / 1000);
+            addedFareMax += (dist / 1000) * 3;
+          }
+        }
+      }
+    }
+
+    if (!changed) return itinerary;
+
+    final origDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
+    final updatedDuration = _durationFromLegs(legs, origDuration);
+    final walkingSeconds = legs
+        .where((l) => l['mode']?.toString().toUpperCase() == 'WALK')
+        .fold<int>(0, (total, leg) {
+      final start = DateTime.tryParse(leg['startTime']?.toString() ?? '');
+      final end = DateTime.tryParse(leg['endTime']?.toString() ?? '');
+      return total +
+          (start != null && end != null ? end.difference(start).inSeconds : 0);
+    });
+
+    final previousFareMin = (itinerary['fareMin'] as num?)?.toDouble() ??
+        (itinerary['fareAmount'] as num?)?.toDouble() ??
+        0.0;
+    final previousFareMax =
+        (itinerary['fareMax'] as num?)?.toDouble() ?? previousFareMin;
+
+    final fareLabel = hybridFirstMile && hybridLastMile
+        ? 'Estimated first and last-mile e-hailing fare'
+        : hybridLastMile
+            ? 'Estimated connecting e-hailing fare'
+            : 'Estimated first-mile e-hailing fare';
+
+    final optionMessage = hybridFirstMile && hybridLastMile
+        ? 'E-hailing to the nearest stop and from the last stop, with public transport for the main journey.'
+        : hybridLastMile
+            ? 'Public transport with e-hailing for the final mile because the destination is more than 1 km from the last stop.'
+            : 'E-hailing to the nearest stop, followed by public transport. This avoids a long walk to a connecting service.';
+
+    return {
+      ...itinerary,
+      'duration': updatedDuration,
+      'walkingSeconds': walkingSeconds,
+      'routeCategory': 'hybrid',
+      'hybridFirstMile': hybridFirstMile,
+      'hybridLastMile': hybridLastMile,
+      'fareMin': previousFareMin + addedFareMin,
+      'fareMax': previousFareMax + addedFareMax,
+      'fareLabel': fareLabel,
+      'optionMessage': optionMessage,
+      'legs': legs,
+    };
+  }
+
+  String _itinerarySignature(Map<String, dynamic> itinerary) {
+    final rawLegs = itinerary['legs'];
+    if (rawLegs is! List) return '';
+    return rawLegs.map((l) {
+      if (l is! Map) return '';
+      final mode = l['mode']?.toString() ?? '';
+      final name = l['routeShortName']?.toString() ?? '';
+      final fromName = l['from'] is Map ? (l['from']['name'] ?? '') : '';
+      final toName = l['to'] is Map ? (l['to']['name'] ?? '') : '';
+      return '$mode:$name:$fromName->$toName';
+    }).join(';');
   }
 
   List<Map<String, dynamic>> _firstMileEhailingAlternatives(
@@ -2352,11 +2536,25 @@ class _MapViewState extends State<MapView> {
       }
 
       if (isStreetLeg && legCoordinates.isEmpty) {
-        print(
-          '[JomRide][route] Omitted ${mode.toUpperCase()} line because road '
-          'geometry was unavailable',
-        );
-        continue;
+        final from = leg['from'];
+        final to = leg['to'];
+        if (from is Map &&
+            to is Map &&
+            from['lat'] is num &&
+            from['lon'] is num &&
+            to['lat'] is num &&
+            to['lon'] is num) {
+          legCoordinates.addAll([
+            [(from['lon'] as num).toDouble(), (from['lat'] as num).toDouble()],
+            [(to['lon'] as num).toDouble(), (to['lat'] as num).toDouble()],
+          ]);
+        } else {
+          print(
+            '[JomRide][route] Omitted ${mode.toUpperCase()} line because road '
+            'geometry was unavailable',
+          );
+          continue;
+        }
       }
       if (legCoordinates.isEmpty) continue;
       hasGeometry = true;
@@ -3847,21 +4045,180 @@ class _MapViewState extends State<MapView> {
 
   Future<void> _openEhailingStore() async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
-    final storeUri = Uri.parse(
-      isIos
-          ? 'https://apps.apple.com/my/search?term=e-hailing'
-          : 'https://play.google.com/store/search?q=e-hailing%20Malaysia&c=apps',
+    await showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (modalContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Choose E-hailing Service',
+                      style:
+                          Theme.of(modalContext).textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.of(modalContext).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Connect your route seamlessly with an e-hailing ride:',
+                  style: Theme.of(modalContext).textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[600],
+                      ),
+                ),
+                const SizedBox(height: 16),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF00B14F),
+                    foregroundColor: Colors.white,
+                    child: Icon(Icons.local_taxi),
+                  ),
+                  title: const Text(
+                    'Grab',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: const Text(
+                    'Klang Valley’s primary e-hailing ride network',
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  onTap: () async {
+                    Navigator.of(modalContext).pop();
+                    final appUri = Uri.parse('grab://open');
+                    final webUri = Uri.parse('https://r.grab.com/open');
+                    final storeUri = Uri.parse(
+                      isIos
+                          ? 'https://apps.apple.com/app/grab-taxi-ride-food-delivery/id647268330'
+                          : 'https://play.google.com/store/apps/details?id=com.grabtaxi.passenger',
+                    );
+                    try {
+                      if (!await launchUrl(
+                        appUri,
+                        mode: LaunchMode.externalApplication,
+                      )) {
+                        if (!await launchUrl(
+                          webUri,
+                          mode: LaunchMode.externalApplication,
+                          webOnlyWindowName: kIsWeb ? '_self' : null,
+                        )) {
+                          await launchUrl(
+                            storeUri,
+                            mode: LaunchMode.externalApplication,
+                            webOnlyWindowName: kIsWeb ? '_self' : null,
+                          );
+                        }
+                      }
+                    } catch (_) {
+                      await launchUrl(
+                        storeUri,
+                        mode: LaunchMode.externalApplication,
+                        webOnlyWindowName: kIsWeb ? '_self' : null,
+                      );
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFFED1C24),
+                    foregroundColor: Colors.white,
+                    child: Icon(Icons.directions_car),
+                  ),
+                  title: const Text(
+                    'AirAsia Move (AirAsia Ride)',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: const Text(
+                    'Affordable e-hailing fares and transfers',
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  onTap: () async {
+                    Navigator.of(modalContext).pop();
+                    final webUri = Uri.parse('https://www.airasia.com/ride/');
+                    final storeUri = Uri.parse(
+                      isIos
+                          ? 'https://apps.apple.com/app/airasia-move/id329124503'
+                          : 'https://play.google.com/store/apps/details?id=com.airasia.mobile',
+                    );
+                    try {
+                      if (!await launchUrl(
+                        webUri,
+                        mode: LaunchMode.externalApplication,
+                        webOnlyWindowName: kIsWeb ? '_self' : null,
+                      )) {
+                        await launchUrl(
+                          storeUri,
+                          mode: LaunchMode.externalApplication,
+                          webOnlyWindowName: kIsWeb ? '_self' : null,
+                        );
+                      }
+                    } catch (_) {
+                      await launchUrl(
+                        storeUri,
+                        mode: LaunchMode.externalApplication,
+                        webOnlyWindowName: kIsWeb ? '_self' : null,
+                      );
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: Colors.blueGrey.shade100,
+                    foregroundColor: Colors.blueGrey.shade800,
+                    child: const Icon(Icons.store),
+                  ),
+                  title: Text(
+                    isIos ? 'Search App Store' : 'Search Google Play',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: const Text(
+                    'Find more Malaysian e-hailing apps',
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  onTap: () async {
+                    Navigator.of(modalContext).pop();
+                    final storeSearchUri = Uri.parse(
+                      isIos
+                          ? 'https://apps.apple.com/my/search?term=e-hailing'
+                          : 'https://play.google.com/store/search?q=e-hailing%20Malaysia&c=apps',
+                    );
+                    await launchUrl(
+                      storeSearchUri,
+                      mode: LaunchMode.externalApplication,
+                      webOnlyWindowName: kIsWeb ? '_self' : null,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
-    if (!await launchUrl(
-      storeUri,
-      mode: LaunchMode.externalApplication,
-      // In a browser, navigate this tab directly. Opening a new window via
-      // window.open can be blocked after the async platform call and leave an
-      // about:blank tab behind.
-      webOnlyWindowName: kIsWeb ? '_self' : null,
-    )) {
-      _showMessage('Could not open the ${isIos ? 'App Store' : 'Play Store'}.');
-    }
   }
 
 
@@ -4247,9 +4604,6 @@ class _MapViewState extends State<MapView> {
                                 // Claim taps on the floating search/station panel
                                 // so they cannot fall through to MapLibre beneath it.
                                 onTap: () {},
-                                onPanStart: (_) => _setScrollingCard(true),
-                                onPanUpdate: (_) => _setScrollingCard(true),
-                                onPanEnd: (_) => _setScrollingCard(false),
                                 child: _buildMapTopPanel(),
                               ),
                             ),
@@ -4269,37 +4623,16 @@ class _MapViewState extends State<MapView> {
                           ),
                         ),
                       if (_currentItinerary != null)
-                        NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is ScrollStartNotification ||
-                                notification is UserScrollNotification) {
-                              _setScrollingCard(true);
-                            } else if (notification is ScrollEndNotification) {
-                              _setScrollingCard(false);
-                            }
-                            return false;
-                          },
-                          child: Listener(
-                            behavior: HitTestBehavior.opaque,
-                            onPointerDown: (_) => _setScrollingCard(true),
-                            onPointerUp: (_) => _setScrollingCard(false),
-                            onPointerCancel: (_) => _setScrollingCard(false),
-                            onPointerSignal: (event) {
-                              if (event is PointerScrollEvent) {
-                                _setScrollingCard(true);
-                              }
-                            },
-                            child: ItinerarySheet(
-                              itinerary: _currentItinerary!,
-                              initialExtent: _itineraryInitialExtent,
-                              weatherReminder:
-                                  _weatherItineraryReminder(_currentItinerary!),
-                              guidanceCard: _buildJourneyGuidanceCard(),
-                              onDismiss: _dismissItinerary,
-                              onFindApps: _openEhailingStore,
-                              onUserInteracted: _markItineraryUserInteracted,
-                            ),
-                          ),
+                        ItinerarySheet(
+                          itinerary: _currentItinerary!,
+                          initialExtent: _itineraryInitialExtent,
+                          weatherReminder:
+                              _weatherItineraryReminder(_currentItinerary!),
+                          guidanceCard: _buildJourneyGuidanceCard(),
+                          onDismiss: _dismissItinerary,
+                          onFindApps: _openEhailingStore,
+                          onUserInteracted: _markItineraryUserInteracted,
+                          onCardInteractionChanged: _setScrollingCard,
                         ),
                     ],
                   ),
