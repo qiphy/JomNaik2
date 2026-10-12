@@ -161,6 +161,7 @@ class _MapViewState extends State<MapView> {
   bool _isSatelliteMode = false;
   bool _isCardExpanded = false;
   bool _isStationDetailsOpen = false;
+  bool _isRouteChoicesOpen = false;
   bool _suppressMapTapFromOverlay = false;
   Timer? _mapTapSuppressionTimer;
   bool _isUsingCurrentLocation = true;
@@ -807,6 +808,7 @@ class _MapViewState extends State<MapView> {
     if (_currentItinerary != null ||
         _isCardExpanded ||
         _isStationDetailsOpen ||
+        _isRouteChoicesOpen ||
         _suppressMapTapFromOverlay) {
       return;
     }
@@ -815,7 +817,12 @@ class _MapViewState extends State<MapView> {
       return;
     }
     try {
-      final stop = await _transitStopAtMapPoint(point);
+      var stop = await _transitStopAtMapPoint(point);
+      stop ??= _nearestTransitStopWithin(
+        coordinate.latitude,
+        coordinate.longitude,
+        120.0,
+      );
       final place = stop == null
           ? await _reverseGeocodePlace(coordinate)
           : PlaceSearchResult(
@@ -926,13 +933,19 @@ class _MapViewState extends State<MapView> {
       _showUnsupportedZone();
       return;
     }
+    final candidateFromStopId = origin == null ? selectedStart!.stopId : null;
+    final effectiveFromStopId = candidateFromStopId ??
+        _nearestTransitStopWithin(originLat, originLon, 200.0)?.id;
+    final effectiveToStopId = destination.stopId ??
+        _nearestTransitStopWithin(destination.lat, destination.lon, 200.0)?.id;
+
     final routeData = await _requestRoute(
       fromLat: originLat,
       fromLon: originLon,
       toLat: destination.lat,
       toLon: destination.lon,
-      fromStopId: origin == null ? selectedStart!.stopId : null,
-      toStopId: destination.stopId,
+      fromStopId: effectiveFromStopId,
+      toStopId: effectiveToStopId,
     );
     await _showRouteChoices(routeData);
   }
@@ -1020,6 +1033,7 @@ class _MapViewState extends State<MapView> {
     if (_currentItinerary != null ||
         _isCardExpanded ||
         _isStationDetailsOpen ||
+        _isRouteChoicesOpen ||
         _suppressMapTapFromOverlay) {
       return;
     }
@@ -1036,36 +1050,42 @@ class _MapViewState extends State<MapView> {
       'transit_stops_layer',
     ], null);
     if (!mounted) return;
+    TransitStop? stop;
     if (features != null && features.isNotEmpty) {
       final feature = features.first;
       final properties = feature is Map && feature['properties'] is Map
           ? feature['properties'] as Map
           : null;
       final stopId = properties?['id']?.toString();
-      final stop = stopId == null ? null : _transitStopsById[stopId];
-      if (stop != null) {
-        final shouldUseStop = await showDialog<bool>(
-          context: context,
-          builder: (dialogContext) => AlertDialog(
-            title: const Text('Use this station or stop?'),
-            content: Text(stop.name),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(false),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(dialogContext).pop(true),
-                child: const Text('Set as start'),
-              ),
-            ],
-          ),
-        );
-        if (shouldUseStop == true && !picker.isCompleted) {
-          picker.complete(stop.asPlaceSearchResult());
-        }
-        return;
+      stop = stopId == null ? null : _transitStopsById[stopId];
+    }
+    stop ??= _nearestTransitStopWithin(
+      coordinate.latitude,
+      coordinate.longitude,
+      120.0,
+    );
+    if (stop != null) {
+      final shouldUseStop = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Use this station or stop?'),
+          content: Text(stop!.name),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Set as start'),
+            ),
+          ],
+        ),
+      );
+      if (shouldUseStop == true && !picker.isCompleted) {
+        picker.complete(stop.asPlaceSearchResult());
       }
+      return;
     }
     final place = await _reverseGeocodePlace(coordinate);
     if (!picker.isCompleted) picker.complete(place);
@@ -1319,15 +1339,21 @@ class _MapViewState extends State<MapView> {
       return;
     }
 
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => RouteChoicesSheet(
-        itineraries: itineraries,
-        onSelectItinerary: _applyItinerary,
-      ),
-    );
+    if (_isRouteChoicesOpen || !mounted) return;
+    setState(() => _isRouteChoicesOpen = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) => RouteChoicesSheet(
+          itineraries: itineraries,
+          onSelectItinerary: _applyItinerary,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isRouteChoicesOpen = false);
+    }
   }
 
   Future<void> _applyItinerary(Map<String, dynamic> itinerary) async {
@@ -1445,7 +1471,7 @@ class _MapViewState extends State<MapView> {
         setState(() {
           _guidanceDistanceMeters = distance;
           _guidanceMessage =
-              'At ${target.name}. Board ${leg.routeShortName ?? 'the service'} toward ${leg.headsign ?? leg.toPlace?.name ?? 'your destination'}.';
+              'At ${target.name}. Board ${leg.routeShortName ?? 'the service'} toward ${leg.terminus ?? leg.headsign ?? leg.toPlace?.name ?? 'your destination'}.';
         });
         return;
       }
@@ -1559,15 +1585,15 @@ class _MapViewState extends State<MapView> {
         .where((leg) => leg.mode.toUpperCase() == 'WALK' && leg.isSheltered)
         .length;
     if (openWalks > 0) {
-      return 'Rain conditions nearby: bring an umbrella. This journey includes '
+      return 'This journey includes '
           '$openWalks open walking ${openWalks == 1 ? 'section' : 'sections'}; '
           'use covered paths where available.';
     }
     if (coveredWalks > 0) {
-      return 'Rain conditions nearby: bring an umbrella and prefer the covered '
+      return 'This journey includes the covered '
           '${coveredWalks == 1 ? 'walkway' : 'walkways'} in this itinerary.';
     }
-    return 'Rain conditions nearby: bring an umbrella for station access and transfers.';
+    return 'Bring an umbrella for station access and transfers if it is raining.';
   }
 
   Widget _buildJourneyGuidanceCard() {
@@ -1839,13 +1865,15 @@ class _MapViewState extends State<MapView> {
                 'itineraries': [...validOffline, ...validItineraries],
                 'offlineRouting': true,
               };
-              return _addDirectModeAlternatives(
-                combined,
-                fromLat: fromLat,
-                fromLon: fromLon,
-                toLat: toLat,
-                toLon: toLon,
-                departure: when,
+              return _applyIncidentRisk(
+                _addDirectModeAlternatives(
+                  combined,
+                  fromLat: fromLat,
+                  fromLon: fromLon,
+                  toLat: toLat,
+                  toLon: toLon,
+                  departure: when,
+                ),
               );
             }
           }
@@ -1870,7 +1898,7 @@ class _MapViewState extends State<MapView> {
           'Public transit is not operating at the requested departure time. Showing available alternatives like e-hailing and walking.',
         );
       }
-      return alternatives;
+      return _applyIncidentRisk(alternatives);
     } on FormatException catch (error) {
       _showMessage('The route service returned invalid JSON.');
       debugPrint('Invalid route JSON: $error');
@@ -1965,19 +1993,20 @@ class _MapViewState extends State<MapView> {
     _showMessage(
       'Public transit is not operating at the requested departure time. Showing available alternatives like e-hailing and walking.',
     );
-    return {
+    return _applyIncidentRisk({
       'itineraries': [
         directWalking,
         if (Geolocator.distanceBetween(fromLat, fromLon, toLat, toLon) > 1000)
           directEhailing,
       ],
       'offlineRouting': true,
-    };
+    });
   }
 
   Future<Map<String, dynamic>> _applyIncidentRisk(
     Map<String, dynamic> routeData,
   ) async {
+    routeData = await _applyTomTomTrafficEstimates(routeData);
     try {
       final response = await _httpClient
           .get(
@@ -2041,6 +2070,171 @@ class _MapViewState extends State<MapView> {
       };
     } catch (_) {
       return routeData;
+    }
+  }
+
+  Future<Map<String, dynamic>> _applyTomTomTrafficEstimates(
+    Map<String, dynamic> routeData,
+  ) async {
+    final itineraries = routeData['itineraries'];
+    if (itineraries is! List) return routeData;
+
+    String routeKey(
+      double fromLat,
+      double fromLon,
+      double toLat,
+      double toLon,
+    ) =>
+        '${fromLat.toStringAsFixed(5)},${fromLon.toStringAsFixed(5)}:'
+        '${toLat.toStringAsFixed(5)},${toLon.toStringAsFixed(5)}';
+
+    final requests = <String, Future<Map<String, dynamic>?>>{};
+    for (final rawItinerary in itineraries) {
+      if (rawItinerary is! Map || rawItinerary['legs'] is! List) continue;
+      for (final rawLeg in rawItinerary['legs'] as List) {
+        if (rawLeg is! Map ||
+            rawLeg['mode']?.toString().toUpperCase() != 'HAIL') {
+          continue;
+        }
+        final from = rawLeg['from'];
+        final to = rawLeg['to'];
+        if (from is! Map ||
+            to is! Map ||
+            from['lat'] is! num ||
+            from['lon'] is! num ||
+            to['lat'] is! num ||
+            to['lon'] is! num) {
+          continue;
+        }
+        final fromLat = (from['lat'] as num).toDouble();
+        final fromLon = (from['lon'] as num).toDouble();
+        final toLat = (to['lat'] as num).toDouble();
+        final toLon = (to['lon'] as num).toDouble();
+        final key = routeKey(fromLat, fromLon, toLat, toLon);
+        requests.putIfAbsent(
+          key,
+          () => _fetchTomTomTrafficEstimate(
+            fromLat: fromLat,
+            fromLon: fromLon,
+            toLat: toLat,
+            toLon: toLon,
+            departAt: DateTime.tryParse(rawLeg['startTime']?.toString() ?? '')
+                ?.add(
+                  Duration(
+                    seconds: (rawLeg['pickupDuration'] as num?)?.toInt() ?? 0,
+                  ),
+                ),
+          ),
+        );
+      }
+    }
+    if (requests.isEmpty) return routeData;
+
+    final entries = await Future.wait(
+      requests.entries.map(
+        (entry) async => MapEntry(entry.key, await entry.value),
+      ),
+    );
+    final estimates = Map<String, Map<String, dynamic>?>.fromEntries(entries);
+
+    return {
+      ...routeData,
+      'itineraries': itineraries.map((rawItinerary) {
+        if (rawItinerary is! Map || rawItinerary['legs'] is! List) {
+          return rawItinerary;
+        }
+        final itinerary = Map<String, dynamic>.from(rawItinerary);
+        var durationDelta = 0;
+        itinerary['legs'] = (rawItinerary['legs'] as List).map((rawLeg) {
+          if (rawLeg is! Map ||
+              rawLeg['mode']?.toString().toUpperCase() != 'HAIL') {
+            return rawLeg;
+          }
+          final from = rawLeg['from'];
+          final to = rawLeg['to'];
+          if (from is! Map ||
+              to is! Map ||
+              from['lat'] is! num ||
+              from['lon'] is! num ||
+              to['lat'] is! num ||
+              to['lon'] is! num) {
+            return rawLeg;
+          }
+          final key = routeKey(
+            (from['lat'] as num).toDouble(),
+            (from['lon'] as num).toDouble(),
+            (to['lat'] as num).toDouble(),
+            (to['lon'] as num).toDouble(),
+          );
+          final estimate = estimates[key];
+          if (estimate == null) return rawLeg;
+
+          final oldStart = DateTime.tryParse(
+            rawLeg['startTime']?.toString() ?? '',
+          );
+          final start = oldStart ?? DateTime.now();
+          final pickupSeconds =
+              (rawLeg['pickupDuration'] as num?)?.toInt() ?? 0;
+          final drivingSeconds = (estimate['travelTimeSeconds'] as num).toInt();
+          final totalSeconds = math.max(300, pickupSeconds + drivingSeconds);
+          final end = start.add(Duration(seconds: totalSeconds));
+          final oldDuration =
+              (rawLeg['duration'] as num?)?.toInt() ??
+              (() {
+                final oldEnd = DateTime.tryParse(
+                  rawLeg['endTime']?.toString() ?? '',
+                );
+                return oldEnd == null ? 0 : oldEnd.difference(start).inSeconds;
+              })();
+          durationDelta += totalSeconds - oldDuration;
+          return {
+            ...Map<String, dynamic>.from(rawLeg),
+            'startTime': start.toIso8601String(),
+            'endTime': end.toIso8601String(),
+            'duration': totalSeconds,
+            'drivingDuration': drivingSeconds,
+            'trafficDelaySeconds': estimate['trafficDelaySeconds'],
+            'trafficLevel': estimate['trafficLevel'],
+            'distanceMeters': estimate['distanceMeters'],
+            'routingSource': 'tomtom',
+          };
+        }).toList();
+        if (durationDelta != 0) {
+          itinerary['duration'] =
+              ((rawItinerary['duration'] as num?)?.toInt() ?? 0) +
+              durationDelta;
+        }
+        return itinerary;
+      }).toList(),
+    };
+  }
+
+  Future<Map<String, dynamic>?> _fetchTomTomTrafficEstimate({
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+    DateTime? departAt,
+  }) async {
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/api/traffic/route').replace(
+        queryParameters: {
+          'from_lat': fromLat.toStringAsFixed(6),
+          'from_lon': fromLon.toStringAsFixed(6),
+          'to_lat': toLat.toStringAsFixed(6),
+          'to_lon': toLon.toStringAsFixed(6),
+          if (departAt != null) 'depart_at': departAt.toIso8601String(),
+        },
+      );
+      final response = await _httpClient
+          .get(uri, headers: await backendHeaders())
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode != 200) return null;
+      final body = jsonDecode(response.body);
+      return body is Map ? Map<String, dynamic>.from(body) : null;
+    } catch (error) {
+      debugPrint('TomTom e-hailing estimate unavailable: $error');
+      return null;
     }
   }
 
@@ -2319,6 +2513,7 @@ class _MapViewState extends State<MapView> {
               'startTime': start.toIso8601String(),
               'endTime': end.toIso8601String(),
               'routeShortName': 'E-hailing to nearest stop',
+              'pickupDuration': 180,
               'distanceMeters': dist,
               'paymentMethod': 'Pay in the e-hailing app',
               'isFirstMile': true,
@@ -2358,6 +2553,7 @@ class _MapViewState extends State<MapView> {
               'startTime': start.toIso8601String(),
               'endTime': end.toIso8601String(),
               'routeShortName': 'E-hailing from nearest stop',
+              'pickupDuration': 180,
               'distanceMeters': dist,
               'paymentMethod': 'Pay in the e-hailing app',
               'isLastMile': true,
@@ -2421,10 +2617,32 @@ class _MapViewState extends State<MapView> {
   }
 
   double _walkingLegDistanceMeters(Map<String, dynamic> leg) {
+    final from = leg['from'];
+    final to = leg['to'];
+    double? straightDistance;
+    if (from is Map &&
+        to is Map &&
+        from['lat'] is num &&
+        from['lon'] is num &&
+        to['lat'] is num &&
+        to['lon'] is num) {
+      straightDistance = Geolocator.distanceBetween(
+        (from['lat'] as num).toDouble(),
+        (from['lon'] as num).toDouble(),
+        (to['lat'] as num).toDouble(),
+        (to['lon'] as num).toDouble(),
+      );
+    }
+
     final reportedDistance =
         (leg['distanceMeters'] as num?)?.toDouble() ??
         (leg['distance'] as num?)?.toDouble();
     if (reportedDistance != null && reportedDistance > 0) {
+      if (straightDistance != null &&
+          straightDistance <= 500 &&
+          reportedDistance > straightDistance * 2.0) {
+        return straightDistance;
+      }
       return reportedDistance;
     }
 
@@ -2451,24 +2669,17 @@ class _MapViewState extends State<MapView> {
           (current[0] as num).toDouble(),
         );
       }
-      if (distance > 0) return distance;
+      if (distance > 0) {
+        if (straightDistance != null &&
+            straightDistance <= 500 &&
+            distance > straightDistance * 2.0) {
+          return straightDistance;
+        }
+        return distance;
+      }
     }
 
-    final from = leg['from'];
-    final to = leg['to'];
-    if (from is Map &&
-        to is Map &&
-        from['lat'] is num &&
-        from['lon'] is num &&
-        to['lat'] is num &&
-        to['lon'] is num) {
-      return Geolocator.distanceBetween(
-        (from['lat'] as num).toDouble(),
-        (from['lon'] as num).toDouble(),
-        (to['lat'] as num).toDouble(),
-        (to['lon'] as num).toDouble(),
-      );
-    }
+    if (straightDistance != null) return straightDistance;
     return 0;
   }
 
@@ -2544,6 +2755,7 @@ class _MapViewState extends State<MapView> {
         'startTime': walkStart.toIso8601String(),
         'endTime': hailEnd.toIso8601String(),
         'routeShortName': 'E-hailing to nearest stop',
+        'pickupDuration': 180,
         'distanceMeters': distanceMeters,
         'paymentMethod': 'Pay in the e-hailing app',
         'from': from,
@@ -2627,6 +2839,7 @@ class _MapViewState extends State<MapView> {
         'startTime': start.toIso8601String(),
         'endTime': end.toIso8601String(),
         'routeShortName': 'E-hailing from nearest stop',
+        'pickupDuration': 180,
         'distanceMeters': distanceMeters,
         'paymentMethod': 'Pay in the e-hailing app',
         'isLastMile': true,
@@ -2744,6 +2957,7 @@ class _MapViewState extends State<MapView> {
           'startTime': start.toIso8601String(),
           'endTime': end.toIso8601String(),
           'routeShortName': 'E-hailing',
+          'pickupDuration': 180,
           'paymentMethod': 'Pay in the e-hailing app',
           'from': {'name': 'Pickup', 'lat': fromLat, 'lon': fromLon},
           'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
@@ -2800,10 +3014,11 @@ class _MapViewState extends State<MapView> {
       // Transit geometry comes from GTFS. Walking and e-hailing geometry must
       // follow the street network between the user's actual coordinates.
       if (isStreetLeg) {
-        if (mode.toUpperCase() == 'WALK' && leg['isTransferWalk'] == true) {
-          // A station interchange is an internal walkway, not a street trip.
-          // Connecting the two station entrances avoids routing pedestrians
-          // around the road network between adjacent platforms.
+        if (mode.toUpperCase() == 'WALK' &&
+            (leg['isTransferWalk'] == true ||
+                leg['isDirectPedestrian'] == true)) {
+          // A station interchange or direct pedestrian walkway connects the
+          // points directly instead of routing around the road network.
           final from = leg['from'];
           final to = leg['to'];
           if (from is Map &&
@@ -3084,6 +3299,26 @@ class _MapViewState extends State<MapView> {
         return const [];
       }
       final routedDistance = _polylineDistanceMeters(result);
+      final straightDistance = Geolocator.distanceBetween(
+        fromLat,
+        fromLon,
+        toLat,
+        toLon,
+      );
+      if (isWalking &&
+          straightDistance <= 500 &&
+          (routedDistance > straightDistance * 2.0 ||
+              routedDistance > straightDistance + 350)) {
+        print(
+          '[JomRide][route] Suppressed off-road highway detour for pedestrian leg '
+          '(straight=${straightDistance.toStringAsFixed(1)}m, routed=${routedDistance.toStringAsFixed(1)}m). '
+          'Using direct pedestrian connection.',
+        );
+        return [
+          [fromLon, fromLat],
+          [toLon, toLat],
+        ];
+      }
       final privateConnector = _sunwayPrivatePedestrianConnector(
         fromLat: fromLat,
         fromLon: fromLon,
@@ -3583,6 +3818,24 @@ class _MapViewState extends State<MapView> {
     setState(() => _nearestTransitStop = stop);
   }
 
+  TransitStop? _nearestTransitStopWithin(
+    double lat,
+    double lon,
+    double maxDistanceMeters,
+  ) {
+    if (_transitStopsById.isEmpty) return null;
+    TransitStop? closest;
+    var closestDist = maxDistanceMeters;
+    for (final stop in _transitStopsById.values) {
+      final dist = Geolocator.distanceBetween(lat, lon, stop.lat, stop.lon);
+      if (dist <= closestDist) {
+        closest = stop;
+        closestDist = dist;
+      }
+    }
+    return closest;
+  }
+
   void _trackAnonymousStationPresence(Position position) {
     if (!_stationLocationTrackingEnabled ||
         Supabase.instance.client.auth.currentUser == null ||
@@ -4003,6 +4256,7 @@ class _MapViewState extends State<MapView> {
     if (_currentItinerary != null ||
         _isCardExpanded ||
         _isStationDetailsOpen ||
+        _isRouteChoicesOpen ||
         _suppressMapTapFromOverlay) {
       return;
     }
@@ -5179,10 +5433,11 @@ class _MapViewState extends State<MapView> {
                 : Stack(
                     children: [
                       IgnorePointer(
-                        // A modal station sheet can leave the native iOS map
-                        // view in the platform gesture arena. IgnorePointer
-                        // blocks that native view until the sheet is gone.
-                        ignoring: _isStationDetailsOpen,
+                        // A modal station sheet or route choices sheet can
+                        // leave the native/web map view in the gesture arena.
+                        // IgnorePointer blocks that map view until the sheet is gone.
+                        ignoring:
+                            _isStationDetailsOpen || _isRouteChoicesOpen,
                         child: MapLibreMap(
                           key: ValueKey('map_style_$_mapStyleVersion'),
                           initialCameraPosition: const CameraPosition(
@@ -5194,23 +5449,28 @@ class _MapViewState extends State<MapView> {
                           scrollGesturesEnabled:
                               !_isScrollingCard &&
                               !_isCardExpanded &&
-                              !_isStationDetailsOpen,
+                              !_isStationDetailsOpen &&
+                              !_isRouteChoicesOpen,
                           zoomGesturesEnabled:
                               !_isScrollingCard &&
                               !_isCardExpanded &&
-                              !_isStationDetailsOpen,
+                              !_isStationDetailsOpen &&
+                              !_isRouteChoicesOpen,
                           rotateGesturesEnabled:
                               !_isScrollingCard &&
                               !_isCardExpanded &&
-                              !_isStationDetailsOpen,
+                              !_isStationDetailsOpen &&
+                              !_isRouteChoicesOpen,
                           tiltGesturesEnabled:
                               !_isScrollingCard &&
                               !_isCardExpanded &&
-                              !_isStationDetailsOpen,
+                              !_isStationDetailsOpen &&
+                              !_isRouteChoicesOpen,
                           doubleClickZoomEnabled:
                               !_isScrollingCard &&
                               !_isCardExpanded &&
-                              !_isStationDetailsOpen,
+                              !_isStationDetailsOpen &&
+                              !_isRouteChoicesOpen,
                           onMapCreated: (controller) =>
                               _onMapCreated(controller, mapStyleVersion),
                           onStyleLoadedCallback: () =>

@@ -4,7 +4,7 @@ jomnaik plans static public-transit journeys on the device using its bundled
 RAPTOR timetable. This optional FastAPI service adds only live context:
 
 - Open-Meteo weather for the current map centre.
-- TomTom road congestion for e-hailing/station access.
+- TomTom road congestion for bus stops and traffic-aware e-hailing route ETAs.
 - Official data.gov.my GTFS-Realtime bus and KTM vehicle positions.
 - Anonymous station-presence and incident reports stored in Supabase.
 - Recent reports can be used for conservative route-risk ranking; they do not
@@ -100,6 +100,12 @@ Traffic congestion is enabled only when the backend process receives a real
 treated as unconfigured. Verify the setting with `GET /api/health`, which
 returns `"trafficConfigured": true` when the key is loaded. Restart the
 backend after changing environment variables.
+
+`GET /api/traffic/route` calculates a car route through TomTom Routing API
+using current or time-dependent traffic. It returns the expected drive time,
+free-flow time, traffic delay, distance, and a traffic level. Flutter adds its
+pickup-time estimate to the TomTom drive time. Equivalent requests are cached
+briefly to reduce repeated provider calls.
 
 The service health check is `GET /api/health`.
 

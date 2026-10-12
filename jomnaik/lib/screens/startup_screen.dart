@@ -48,9 +48,9 @@ class _StartupScreenState extends State<StartupScreen> {
     final acceptedVersion = await widget.storage.read(
       key: _privacyPolicyConsentKey,
     );
-    
+
     if (!mounted) return;
-    
+
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
         builder: (_) => acceptedVersion == _privacyPolicyVersion
@@ -72,12 +72,19 @@ class _StartupScreenState extends State<StartupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: isDark ? const Color(0xFF0F172A) : Colors.white,
       body: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [Image.asset('assets/logo.png', width: 220, height: 220)],
+          children: [
+            Image.asset(
+              'assets/logo.png',
+              width: 220,
+              height: 220,
+            ),
+          ],
         ),
       ),
     );

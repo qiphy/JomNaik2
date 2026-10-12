@@ -8,6 +8,7 @@ class Itinerary {
     this.fareMin,
     this.fareMax,
     this.congestion,
+    this.incidentDelaySeconds = 0,
   });
 
   factory Itinerary.fromJson(Map<String, dynamic> json) {
@@ -41,6 +42,8 @@ class Itinerary {
       congestion: json['congestion'] is Map
           ? Map<String, dynamic>.from(json['congestion'] as Map)
           : null,
+      incidentDelaySeconds:
+          (json['incidentDelaySeconds'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -52,6 +55,16 @@ class Itinerary {
   final double? fareMin;
   final double? fareMax;
   final Map<String, dynamic>? congestion;
+  final int incidentDelaySeconds;
+
+  bool get hasIncidents =>
+      incidentDelaySeconds > 0 ||
+      legs.any((leg) => leg.incidentReports.isNotEmpty);
+
+  int get incidentReportsCount => legs.fold<int>(
+        0,
+        (sum, leg) => sum + leg.incidentReports.length,
+      );
 }
 
 class ItineraryLeg {
@@ -61,6 +74,7 @@ class ItineraryLeg {
     required this.endTime,
     this.routeShortName,
     this.headsign,
+    this.terminus,
     this.fromPlace,
     this.toPlace,
     this.isSheltered = false,
@@ -70,6 +84,9 @@ class ItineraryLeg {
     this.liveBusEstimate,
     this.distanceMeters,
     this.distanceToDestinationMeters,
+    this.trafficLevel,
+    this.trafficDelaySeconds,
+    this.drivingDurationSeconds,
     this.intermediateStops = const [],
     this.incidentReports = const [],
   });
@@ -89,6 +106,7 @@ class ItineraryLeg {
       ),
       routeShortName: json['routeShortName']?.toString(),
       headsign: json['headsign']?.toString(),
+      terminus: json['terminus']?.toString() ?? json['headsign']?.toString(),
       fromPlace: ItineraryPlace.fromJsonOrNull(json['from']),
       toPlace: ItineraryPlace.fromJsonOrNull(json['to']),
       isSheltered: json['isSheltered'] == true,
@@ -99,6 +117,9 @@ class ItineraryLeg {
       distanceMeters: (json['distanceMeters'] as num?)?.toDouble(),
       distanceToDestinationMeters: (json['distanceToDestinationMeters'] as num?)
           ?.toDouble(),
+      trafficLevel: json['trafficLevel']?.toString(),
+      trafficDelaySeconds: (json['trafficDelaySeconds'] as num?)?.toInt(),
+      drivingDurationSeconds: (json['drivingDuration'] as num?)?.toInt(),
       intermediateStops: _intermediateStopsFromJson(json['intermediateStops']),
       incidentReports: _legIncidentsFromJson(json['incidentReports']),
     );
@@ -109,6 +130,7 @@ class ItineraryLeg {
   final String endTime;
   final String? routeShortName;
   final String? headsign;
+  final String? terminus;
   final ItineraryPlace? fromPlace;
   final ItineraryPlace? toPlace;
   final bool isSheltered;
@@ -118,13 +140,18 @@ class ItineraryLeg {
   final LiveBusEstimate? liveBusEstimate;
   final double? distanceMeters;
   final double? distanceToDestinationMeters;
+  final String? trafficLevel;
+  final int? trafficDelaySeconds;
+  final int? drivingDurationSeconds;
   final List<IntermediateStop> intermediateStops;
   final List<LegIncident> incidentReports;
 
   String get terminalDirection {
-    final sign = headsign?.trim().isNotEmpty == true
-        ? headsign!.trim()
-        : toPlace?.name.trim() ?? '';
+    final sign = terminus?.trim().isNotEmpty == true
+        ? terminus!.trim()
+        : (headsign?.trim().isNotEmpty == true
+            ? headsign!.trim()
+            : toPlace?.name.trim() ?? '');
     if (sign.isEmpty) return 'Direction unavailable';
 
     final toMatches = RegExp(

@@ -73,6 +73,8 @@ flutter:
     - assets/65f71978-dde6-4d73-86a7-767322b8edbb/Rapid KL.geojson
     - assets/offline/raptor_klang_valley.json
     - assets/logo.png
+    - assets/logo_black.png
+    - assets/logo_white.png
     
 flutter_launcher_icons:
   android: true

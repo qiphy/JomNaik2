@@ -169,7 +169,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    'Total Travel Time: ${formatDuration(widget.itinerary.duration)}',
+                                    'Total Travel Time: ${formatDuration(widget.itinerary.duration)}'
+                                    '${widget.itinerary.incidentDelaySeconds > 0 ? ' (+${formatDuration(widget.itinerary.incidentDelaySeconds)} due to incidents)' : ''}',
                                     style: theme.textTheme.titleMedium
                                         ?.copyWith(
                                           fontSize: 18,
@@ -303,6 +304,18 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                                     color: colorScheme.outline,
                                   ),
                                 ),
+                                if (leg.trafficLevel != null) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'TomTom estimate • ${leg.trafficLevel![0].toUpperCase()}${leg.trafficLevel!.substring(1)} traffic'
+                                    '${(leg.trafficDelaySeconds ?? 0) > 0 ? ' • +${formatDuration(leg.trafficDelaySeconds!)} traffic' : ''}'
+                                    '${leg.drivingDurationSeconds != null ? ' • ${formatDuration(leg.drivingDurationSeconds!)} driving' : ''}',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: colorScheme.outline,
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ),

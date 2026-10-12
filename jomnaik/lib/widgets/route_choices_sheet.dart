@@ -20,35 +20,58 @@ class RouteChoicesSheet extends StatelessWidget {
   }
 
   String _routeOptionTitle(Map<String, dynamic> itinerary) {
-    switch (itinerary['routeCategory']?.toString().toLowerCase()) {
-      case 'rail':
-        return 'Mostly rail';
-      case 'bus':
-        return 'Mostly bus';
+    final category = itinerary['routeCategory']?.toString().toLowerCase();
+    switch (category) {
       case 'ehailing':
         return 'E-hailing';
       case 'hybrid':
         return 'Hybrid';
       case 'walking':
       case 'walk':
-        return 'Walk';
+        return 'Walking';
     }
-    final modes = _itineraryLegs(
-      itinerary,
-    ).map((leg) => leg['mode']?.toString().toUpperCase()).toSet();
-    final hasTransit = modes.any(
-      (mode) => {'RAIL', 'SUBWAY', 'TRAM', 'BUS'}.contains(mode),
-    );
-    if (modes.contains('HAIL') && hasTransit) return 'Hybrid';
-    if (modes.contains('HAIL')) return 'E-hailing';
+
+    final legs = _itineraryLegs(itinerary);
+    final modes = legs
+        .map((leg) => leg['mode']?.toString().toUpperCase())
+        .toSet();
+    final hasHailing = modes.contains('HAIL');
     final hasBus = modes.contains('BUS');
     final hasRail = modes.any(
       (mode) => mode == 'RAIL' || mode == 'SUBWAY' || mode == 'TRAM',
     );
-    if (hasBus && hasRail) return 'Mostly rail';
+    if (hasHailing && (hasBus || hasRail)) return 'Hybrid';
+    if (hasHailing) return 'E-hailing';
+    if (hasBus && hasRail) {
+      double legSeconds(Map<String, dynamic> leg) {
+        final duration = leg['duration'];
+        if (duration is num && duration > 0) return duration.toDouble();
+        final start = DateTime.tryParse(leg['startTime']?.toString() ?? '');
+        final end = DateTime.tryParse(leg['endTime']?.toString() ?? '');
+        return start != null && end != null && end.isAfter(start)
+            ? end.difference(start).inSeconds.toDouble()
+            : 0;
+      }
+
+      final busSeconds = legs
+          .where((leg) => leg['mode']?.toString().toUpperCase() == 'BUS')
+          .fold<double>(0, (total, leg) => total + legSeconds(leg));
+      final railSeconds = legs
+          .where(
+            (leg) => {
+              'RAIL',
+              'SUBWAY',
+              'TRAM',
+            }.contains(leg['mode']?.toString().toUpperCase()),
+          )
+          .fold<double>(0, (total, leg) => total + legSeconds(leg));
+      return busSeconds > railSeconds ? 'Mostly bus' : 'Mostly rail';
+    }
     if (hasRail) return 'Mostly rail';
     if (hasBus) return 'Mostly bus';
-    return 'Walk';
+    if (category == 'rail') return 'Mostly rail';
+    if (category == 'bus') return 'Mostly bus';
+    return 'Walking';
   }
 
   IconData _routeOptionIcon(Map<String, dynamic> itinerary) {

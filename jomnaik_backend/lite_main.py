@@ -10,7 +10,7 @@ import os
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from math import asin, cos, radians, sin, sqrt
+from math import asin, atan2, cos, radians, sin, sqrt
 from typing import Any
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from tomtom import TomTomTrafficError, fetch_congestion
+from tomtom import TomTomTrafficError, fetch_congestion, fetch_route_estimate
 from realtime import fetch_vehicle_positions
 from weather import fetch_current_weather
 from gtfs_schedule import _load_bundle, departures_for_stop
@@ -58,6 +58,7 @@ SUPABASE_SERVICE_ROLE_KEY = _env_first(
 _MALAYSIA = ZoneInfo("Asia/Kuala_Lumpur")
 _weather_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
 _traffic_cache: dict[tuple[float, float], tuple[float, dict[str, Any]]] = {}
+_traffic_route_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 _offline_manifest_cache: tuple[float, dict[str, str]] | None = None
 _vehicle_cache: tuple[float, dict[str, Any]] | None = None
 _places_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -147,6 +148,17 @@ def _distance_km(
         radians(second_lat)
     ) * sin(lon_delta / 2) ** 2
     return 12_742 * asin(sqrt(value))
+
+
+def _bearing_degrees(
+    first_lat: float, first_lon: float, second_lat: float, second_lon: float
+) -> float:
+    """Initial bearing from the vehicle toward a candidate stop."""
+    lat1, lat2 = radians(first_lat), radians(second_lat)
+    lon_delta = radians(second_lon - first_lon)
+    y = sin(lon_delta) * cos(lat2)
+    x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(lon_delta)
+    return (atan2(y, x) * 180 / 3.141592653589793 + 360) % 360
 
 
 async def _vehicle_positions() -> dict[str, Any]:
@@ -307,7 +319,14 @@ async def gtfs_departures(
         for key in _load_bundle().get("stops", {})
         if key == stop_id or key.rsplit(":", 1)[-1].casefold() == stop_id.casefold()
     }
-    if any(key.startswith("rapid-kl-bus:") or key.startswith("rapid-kl-bus-mrtfeeder:") for key in matching_stops):
+    is_brt_station = any(
+        key.startswith("rapid-kl-rail:BRT") for key in matching_stops
+    )
+    if any(
+        key.startswith("rapid-kl-bus:")
+        or key.startswith("rapid-kl-bus-mrtfeeder:")
+        for key in matching_stops
+    ) or is_brt_station:
         value = await _add_live_bus_departures(value, matching_stops, limit)
     logger.info(
         "GET /api/gtfs/stops/%s/departures returned %d departures",
@@ -320,28 +339,47 @@ async def gtfs_departures(
 async def _add_live_bus_departures(
     value: dict[str, Any], matching_stops: set[str], limit: int
 ) -> dict[str, Any]:
-    """Prepend route-matched bus ETAs derived from official vehicle positions."""
+    """Add route-matched bus ETAs, including B1000 at BRT platforms."""
     bundle = _load_bundle()
     stops = bundle.get("stops", {})
+    transfers = bundle.get("transfers", {})
+    vehicle_stop_ids = set(matching_stops)
+    is_brt_station = any(
+        key.startswith("rapid-kl-rail:BRT") for key in matching_stops
+    )
+    if is_brt_station:
+        # Static GTFS keeps BRT platforms under rapid-kl-rail:BRT* while the
+        # official live vehicle feed reports these buses as route B1000.
+        # Their stop IDs are linked by the transfer table.
+        for station_id in matching_stops:
+            for transfer in transfers.get(station_id, []):
+                if (
+                    isinstance(transfer, list)
+                    and transfer
+                    and str(transfer[0]).startswith("rapid-kl-bus:")
+                ):
+                    vehicle_stop_ids.add(str(transfer[0]))
     stop_points = [
         stops[key]
-        for key in matching_stops
+        for key in vehicle_stop_ids
         if isinstance(stops.get(key), list) and len(stops[key]) >= 3
     ]
     if not stop_points:
         return value
     route_ids: set[str] = set()
     route_terminals: dict[str, set[str]] = {}
+    trips_by_route: dict[str, list[list[Any]]] = {}
     for trip in bundle.get("trips", []):
         if not isinstance(trip, list) or len(trip) < 5:
             continue
         calls = trip[4]
         if isinstance(calls, list) and any(
-            isinstance(call, list) and call and call[0] in matching_stops
+            isinstance(call, list) and call and call[0] in vehicle_stop_ids
             for call in calls
         ):
             route_id = str(trip[1])
             route_ids.add(route_id)
+            trips_by_route.setdefault(route_id, []).append(trip)
             headsign = str(trip[3]).strip() if len(trip) > 3 else ""
             if headsign:
                 route_terminals.setdefault(route_id, set()).add(headsign)
@@ -390,18 +428,63 @@ async def _add_live_bus_departures(
         lat, lon = vehicle.get("lat"), vehicle.get("lon")
         if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
             continue
-        distance_km = min(
-            _distance_km(lat, lon, float(stop[1]), float(stop[2]))
-            for stop in stop_points
+        nearest_stop = min(
+            stop_points,
+            key=lambda stop: _distance_km(
+                lat, lon, float(stop[1]), float(stop[2])
+            ),
+        )
+        distance_km = _distance_km(
+            lat, lon, float(nearest_stop[1]), float(nearest_stop[2])
         )
         if distance_km > 8:
             continue
+        bearing = vehicle.get("bearing")
+        if (
+            isinstance(bearing, (int, float))
+            and distance_km > 0.1
+        ):
+            bearing_to_stop = _bearing_degrees(
+                lat,
+                lon,
+                float(nearest_stop[1]),
+                float(nearest_stop[2]),
+            )
+            difference = abs((float(bearing) - bearing_to_stop + 180) % 360 - 180)
+            if difference > 120:
+                continue
         speed = vehicle.get("speedMps")
         speed_mps = float(speed) if isinstance(speed, (int, float)) and speed > 2 else 8.0
         eta_seconds = max(90, round(distance_km * 1000 / speed_mps) + 60)
         route = routes.get(route_key, [])
         route_name = route[0] if isinstance(route, list) and route else route_key.rsplit(":", 1)[-1]
-        terminals = sorted(route_terminals.get(route_key, set()))
+        if is_brt_station and route_key == "rapid-kl-bus:B1000":
+            brt_route = routes.get("rapid-kl-rail:BRT", [])
+            if isinstance(brt_route, list) and brt_route:
+                route_name = brt_route[0]
+        realtime_trip_id = str(vehicle.get("tripId") or "").casefold()
+        matched_trip = next(
+            (
+                trip
+                for trip in trips_by_route.get(route_key, [])
+                if len(trip) > 3
+                and realtime_trip_id
+                and (
+                    str(trip[0]).rsplit(":", 1)[-1].casefold().endswith(
+                        realtime_trip_id
+                    )
+                    or realtime_trip_id.endswith(
+                        str(trip[0]).rsplit(":", 1)[-1].casefold()
+                    )
+                )
+            ),
+            None,
+        )
+        terminal = (
+            str(matched_trip[3]).strip()
+            if matched_trip is not None and str(matched_trip[3]).strip()
+            else next(iter(sorted(route_terminals.get(route_key, set()))), "")
+        )
         estimate = {
             "route": str(route_name),
             "time": datetime.fromtimestamp(
@@ -409,27 +492,44 @@ async def _add_live_bus_departures(
             ).astimezone(_MALAYSIA).strftime("%H:%M"),
             "timestamp": now_ms + eta_seconds * 1000,
             "is_estimated": True,
-            "terminal": terminals[0] if terminals else "",
+            "terminal": terminal,
             "source": "data.gov.my GTFS-Realtime vehicle position",
             "vehicle_id": vehicle.get("id"),
             "vehicle_timestamp": source_timestamp,
         }
-        previous = estimates_by_route.get(route_key)
+        estimate_key = f"{route_key}|{terminal}"
+        previous = estimates_by_route.get(estimate_key)
         if previous is None or estimate["timestamp"] < previous["timestamp"]:
-            estimates_by_route[route_key] = estimate
+            estimates_by_route[estimate_key] = estimate
     estimates = list(estimates_by_route.values())
     existing = value.get("departures", [])
-    # Live vehicle arrivals are the primary display. Keep the timetable only
-    # when the feed has no usable vehicle estimate for this stop.
-    combined = sorted(
-        estimates if estimates else (existing if isinstance(existing, list) else []),
-        key=lambda item: item.get("timestamp", 0),
-    )
+    scheduled = existing if isinstance(existing, list) else []
+    if is_brt_station and estimates:
+        # Let B1000 movement refine the next BRT arrival, while keeping later
+        # scheduled departures visible as timetable fallback/options.
+        combined = list(estimates)
+        for item in scheduled:
+            same_service_prediction = any(
+                str(item.get("route", "")).casefold()
+                == str(estimate.get("route", "")).casefold()
+                and abs(int(item.get("timestamp", 0)) - int(estimate.get("timestamp", 0)))
+                <= 180_000
+                for estimate in estimates
+            )
+            if not same_service_prediction:
+                combined.append(item)
+    else:
+        # For ordinary bus stops, live vehicle arrivals remain the primary
+        # display; use the timetable when no usable vehicle estimate exists.
+        combined = list(estimates) if estimates else scheduled
+    combined.sort(key=lambda item: item.get("timestamp", 0))
     return {
         **value,
         "departures": combined[: max(1, min(limit, 20))],
         "source": (
-            "data.gov.my GTFS-Realtime bus positions"
+            "data.gov.my GTFS-Realtime B1000 and GTFS timetable"
+            if is_brt_station and estimates
+            else "data.gov.my GTFS-Realtime bus positions"
             if estimates
             else "GTFS static timetable"
         ),
@@ -566,6 +666,66 @@ async def traffic(
         lat,
         lon,
     )
+    return value
+
+
+@app.get("/api/traffic/route")
+async def traffic_route(
+    from_lat: float = Query(ge=2.7, le=3.5),
+    from_lon: float = Query(ge=101.2, le=102.1),
+    to_lat: float = Query(ge=2.7, le=3.5),
+    to_lon: float = Query(ge=101.2, le=102.1),
+    depart_at: str | None = None,
+) -> dict[str, Any]:
+    """Return a TomTom traffic-aware car ETA for an e-hailing leg."""
+    tomtom_api_key = _tomtom_api_key()
+    if not tomtom_api_key:
+        raise HTTPException(503, "Traffic routing is not configured")
+
+    departure: datetime | None = None
+    if depart_at:
+        try:
+            departure = datetime.fromisoformat(depart_at.replace("Z", "+00:00"))
+            if departure.tzinfo is None:
+                departure = departure.replace(tzinfo=_MALAYSIA)
+        except ValueError as error:
+            raise HTTPException(400, "depart_at must be an ISO 8601 datetime") from error
+
+    # A five-minute departure bucket allows similar itinerary alternatives to
+    # share one provider request, while the short TTL keeps traffic estimates fresh.
+    departure_bucket = (
+        departure.replace(minute=(departure.minute // 5) * 5, second=0, microsecond=0)
+        .isoformat()
+        if departure is not None
+        else "now"
+    )
+    cache_key = (
+        f"{from_lat:.4f},{from_lon:.4f}",
+        f"{to_lat:.4f},{to_lon:.4f}",
+        departure_bucket,
+    )
+    cached = _traffic_route_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            value = await fetch_route_estimate(
+                client,
+                api_key=tomtom_api_key,
+                from_latitude=from_lat,
+                from_longitude=from_lon,
+                to_latitude=to_lat,
+                to_longitude=to_lon,
+                depart_at=departure,
+            )
+    except TomTomTrafficError as error:
+        logger.warning("TomTom e-hailing route estimate failed: %s", error)
+        raise HTTPException(503, "Traffic-aware route estimate is unavailable") from error
+
+    if len(_traffic_route_cache) >= 1000:
+        _traffic_route_cache.clear()
+    _traffic_route_cache[cache_key] = (time.monotonic(), value)
     return value
 
 

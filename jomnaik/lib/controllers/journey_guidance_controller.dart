@@ -104,7 +104,7 @@ class JourneyGuidanceController extends ChangeNotifier {
     if (distance <= arrivalRadius) {
       if (_isTransitLeg(leg) && !_hasBoardedTransit) {
         _distanceMeters = distance;
-        _message = 'At ${target.name}. Board ${leg.routeShortName ?? 'the service'} toward ${leg.headsign ?? leg.toPlace?.name ?? 'your destination'}.';
+        _message = 'At ${target.name}. Board ${leg.routeShortName ?? 'the service'} toward ${leg.terminus ?? leg.headsign ?? leg.toPlace?.name ?? 'your destination'}.';
         notifyListeners();
         return;
       }

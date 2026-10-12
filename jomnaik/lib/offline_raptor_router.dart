@@ -82,9 +82,18 @@ class OfflineRaptorRouter {
       'step_free' => 0.8,
       _ => 1.25,
     };
-    // Include stops beyond walking distance so the client can replace a long
-    // access walk with an e-hailing first mile.
-    final origin = _nearby(
+    // Find transit stops within walking distance (<= 1000m) and wider hybrid radius (<= 3000m).
+    // Searching walkable stops separately ensures genuine walking-access public transit
+    // (such as BRT at South Quay) is never pruned by a distant station reached via e-hailing.
+    final walkableOrigins = _nearby(
+      stops,
+      fromLat,
+      fromLon,
+      preferred: fromStopId,
+      maxDistanceMeters: 1000,
+      walkingSpeed: walkingSpeed,
+    );
+    final allOrigins = _nearby(
       stops,
       fromLat,
       fromLon,
@@ -92,10 +101,16 @@ class OfflineRaptorRouter {
       maxDistanceMeters: 3000,
       walkingSpeed: walkingSpeed,
     );
-    // Consider later stops that are better aligned with the destination. The
-    // final-mile builder decides whether the remaining distance is walkable or
-    // should use e-hailing.
-    final destination = _nearby(
+
+    final walkableDestinations = _nearby(
+      stops,
+      toLat,
+      toLon,
+      preferred: toStopId,
+      maxDistanceMeters: 1000,
+      walkingSpeed: walkingSpeed,
+    );
+    final allDestinations = _nearby(
       stops,
       toLat,
       toLon,
@@ -103,7 +118,8 @@ class OfflineRaptorRouter {
       maxDistanceMeters: 3000,
       walkingSpeed: walkingSpeed,
     );
-    if (origin.isEmpty || destination.isEmpty) {
+
+    if (allOrigins.isEmpty || allDestinations.isEmpty) {
       return null;
     }
 
@@ -128,6 +144,162 @@ class OfflineRaptorRouter {
         }
       }
     }
+
+    final rawItineraries = <Map<String, dynamic>>[];
+
+    // Pass 1: Walkable access. Always plan pure public-transit if walkable stops exist.
+    if (walkableOrigins.isNotEmpty) {
+      rawItineraries.addAll(
+        _runRaptor(
+          origin: walkableOrigins,
+          destination: walkableDestinations.isNotEmpty
+              ? walkableDestinations
+              : allDestinations,
+          activeTrips: activeTrips,
+          data: data,
+          when: when,
+          startSeconds: startSeconds,
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+          walkingSpeed: walkingSpeed,
+        ),
+      );
+    }
+
+    // Pass 2: Hybrid access. If there are wider stops, also explore hybrid options.
+    if (allOrigins.length > walkableOrigins.length ||
+        (walkableDestinations.isEmpty && allDestinations.isNotEmpty)) {
+      rawItineraries.addAll(
+        _runRaptor(
+          origin: allOrigins,
+          destination: allDestinations,
+          activeTrips: activeTrips,
+          data: data,
+          when: when,
+          startSeconds: startSeconds,
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+          walkingSpeed: walkingSpeed,
+        ),
+      );
+    } else if (walkableOrigins.isEmpty) {
+      rawItineraries.addAll(
+        _runRaptor(
+          origin: allOrigins,
+          destination: allDestinations,
+          activeTrips: activeTrips,
+          data: data,
+          when: when,
+          startSeconds: startSeconds,
+          fromLat: fromLat,
+          fromLon: fromLon,
+          toLat: toLat,
+          toLon: toLon,
+          walkingSpeed: walkingSpeed,
+        ),
+      );
+    }
+
+    if (rawItineraries.isEmpty) {
+      return null;
+    }
+
+    // Deduplicate patterns while preserving distinct transit and access modes
+    final deduplicated = <String, Map<String, dynamic>>{};
+    for (final it in rawItineraries) {
+      final rawLegs = it['legs'];
+      final legs = rawLegs is List
+          ? rawLegs.whereType<Map>().toList()
+          : const <Map>[];
+      final transitLegs = legs.where(
+        (l) => l['mode'] != 'WALK' && l['mode'] != 'HAIL',
+      );
+      final transitSig = transitLegs
+          .map((l) => '${l['mode']}:${l['routeShortName']}')
+          .join('|');
+      final firstMode = legs.isNotEmpty ? legs.first['mode'] : 'none';
+      final lastMode = legs.isNotEmpty ? legs.last['mode'] : 'none';
+      final key = '${it['routeCategory']}|$firstMode|$lastMode|$transitSig';
+      final existing = deduplicated[key];
+      if (existing == null) {
+        deduplicated[key] = it;
+      } else {
+        final currentDuration =
+            (it['duration'] as num?)?.toDouble() ?? double.infinity;
+        final existingDuration =
+            (existing['duration'] as num?)?.toDouble() ?? double.infinity;
+        if (currentDuration < existingDuration) {
+          deduplicated[key] = it;
+        }
+      }
+    }
+
+    final itineraries = deduplicated.values.toList();
+    final availableItineraries = itineraries.where((it) {
+      return isItineraryMapAvailableAtDeparture(it, when);
+    }).toList();
+
+    if (availableItineraries.isEmpty) {
+      return null;
+    }
+
+    double preferenceCost(Map<String, dynamic> itinerary) {
+      final duration =
+          (itinerary['duration'] as num?)?.toDouble() ?? double.infinity;
+      if (walkingPreference == 'standard') return duration;
+      final walking = (itinerary['walkingSeconds'] as num?)?.toDouble() ?? 0;
+      final transfers = (itinerary['transferCount'] as num?)?.toDouble() ?? 0;
+      final walkingWeight = walkingPreference == 'step_free' ? 2.0 : 1.5;
+      final transferPenalty = walkingPreference == 'step_free' ? 480 : 240;
+      return duration +
+          walking * (walkingWeight - 1) +
+          transfers * transferPenalty;
+    }
+
+    availableItineraries.sort((left, right) {
+      final preferenceComparison = preferenceCost(
+        left,
+      ).compareTo(preferenceCost(right));
+      if (preferenceComparison != 0) return preferenceComparison;
+      final distanceComparison =
+          ((left['distanceMeters'] as num?)?.toDouble() ?? double.infinity)
+              .compareTo(
+                (right['distanceMeters'] as num?)?.toDouble() ??
+                    double.infinity,
+              );
+      if (distanceComparison != 0) return distanceComparison;
+      final durationComparison =
+          ((left['duration'] as num?)?.toInt() ?? 1 << 30).compareTo(
+            (right['duration'] as num?)?.toInt() ?? 1 << 30,
+          );
+      if (durationComparison != 0) return durationComparison;
+      final transferComparison =
+          ((left['transferCount'] as num?)?.toInt() ?? 1 << 30).compareTo(
+            (right['transferCount'] as num?)?.toInt() ?? 1 << 30,
+          );
+      return transferComparison;
+    });
+    return {'itineraries': availableItineraries, 'offlineRouting': true};
+  }
+
+  List<Map<String, dynamic>> _runRaptor({
+    required List<_NearbyStop> origin,
+    required List<_NearbyStop> destination,
+    required List<_Trip> activeTrips,
+    required Map<String, dynamic> data,
+    required DateTime when,
+    required int startSeconds,
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+    required double walkingSpeed,
+  }) {
+    if (origin.isEmpty || destination.isEmpty) return const [];
 
     final labels = <String, _Label>{};
     for (final stop in origin) {
@@ -178,13 +350,10 @@ class OfflineRaptorRouter {
         (left, right) => left.label.arrival.compareTo(right.label.arrival),
       );
     if (transitCandidates.isEmpty) {
-      return null;
+      return const [];
     }
     final itineraries = <Map<String, dynamic>>[];
-    // Keep several genuinely different route patterns. The client ranks them
-    // by walking burden, then transfers and duration, instead of presenting
-    // only one low-transfer route and one multi-transfer route.
-    for (final candidate in transitCandidates.take(8)) {
+    for (final candidate in transitCandidates) {
       final route = _toItinerary(
         data: data,
         departure: when,
@@ -201,54 +370,7 @@ class OfflineRaptorRouter {
         (route['itineraries'] as List).whereType<Map<String, dynamic>>(),
       );
     }
-    final availableItineraries = itineraries.where((it) {
-      return isItineraryMapAvailableAtDeparture(it, when);
-    }).toList();
-
-    if (availableItineraries.isEmpty) {
-      return null;
-    }
-
-    double preferenceCost(Map<String, dynamic> itinerary) {
-      final duration =
-          (itinerary['duration'] as num?)?.toDouble() ?? double.infinity;
-      if (walkingPreference == 'standard') return duration;
-      final walking = (itinerary['walkingSeconds'] as num?)?.toDouble() ?? 0;
-      final transfers = (itinerary['transferCount'] as num?)?.toDouble() ?? 0;
-      final walkingWeight = walkingPreference == 'step_free' ? 2.0 : 1.5;
-      final transferPenalty = walkingPreference == 'step_free' ? 480 : 240;
-      return duration +
-          walking * (walkingWeight - 1) +
-          transfers * transferPenalty;
-    }
-
-    availableItineraries.sort((left, right) {
-      final preferenceComparison = preferenceCost(
-        left,
-      ).compareTo(preferenceCost(right));
-      if (preferenceComparison != 0) return preferenceComparison;
-      final distanceComparison =
-          ((left['distanceMeters'] as num?)?.toDouble() ?? double.infinity)
-              .compareTo(
-                (right['distanceMeters'] as num?)?.toDouble() ??
-                    double.infinity,
-              );
-      if (distanceComparison != 0) return distanceComparison;
-      final durationComparison =
-          ((left['duration'] as num?)?.toInt() ?? 1 << 30).compareTo(
-            (right['duration'] as num?)?.toInt() ?? 1 << 30,
-          );
-      if (durationComparison != 0) return durationComparison;
-      final transferComparison =
-          ((left['transferCount'] as num?)?.toInt() ?? 1 << 30).compareTo(
-            (right['transferCount'] as num?)?.toInt() ?? 1 << 30,
-          );
-      return transferComparison;
-    });
-    return {
-      'itineraries': availableItineraries.take(6).toList(),
-      'offlineRouting': true,
-    };
+    return itineraries;
   }
 
   Future<Map<String, dynamic>> _load() async {
@@ -524,6 +646,7 @@ class OfflineRaptorRouter {
         'to': _place(label.initialStop, stops),
       });
     } else if (label.initialWalkSeconds > 0) {
+      final isDirectPedestrian = initialDistance <= 250;
       legs.add(
         _walkLeg(
           departure,
@@ -534,6 +657,13 @@ class OfflineRaptorRouter {
           label.initialStop,
           stops,
           false,
+          isDirectPedestrian: isDirectPedestrian,
+          geometry: isDirectPedestrian
+              ? [
+                  [fromLon, fromLat],
+                  _placeCoordinates(label.initialStop, stops),
+                ]
+              : null,
         ),
       );
     }
@@ -582,12 +712,22 @@ class OfflineRaptorRouter {
               for (var n = ride.fromIndex; n <= ride.toIndex; n++)
                 _placeCoordinates(ride.trip.calls[n].stopId, stops),
             ];
+      final routeShortName = route.isNotEmpty ? route[0].toString() : 'Service';
+      final terminus = _resolveLegTerminus(
+        ride: ride,
+        routeShortName: routeShortName,
+        stops: stops,
+        data: data,
+      );
+      final effectiveHeadsign = terminus ?? (ride.trip.headsign.isNotEmpty ? ride.trip.headsign : null);
+
       legs.add({
         'mode': mode,
         'startTime': _iso(departure, ride.departure),
         'endTime': _iso(departure, ride.arrival),
-        'routeShortName': route.isNotEmpty ? route[0].toString() : 'Service',
-        'headsign': ride.trip.headsign,
+        'routeShortName': routeShortName,
+        'headsign': effectiveHeadsign,
+        'terminus': terminus,
         'from': _place(ride.fromStop, stops),
         'to': _place(ride.toStop, stops),
         // The offline bundle has no road graph, but the ordered GTFS stops
@@ -626,6 +766,7 @@ class OfflineRaptorRouter {
         'to': {'name': 'Destination', 'lat': toLat, 'lon': toLon},
       });
     } else if (finalWalk > 20) {
+      final isDirectPedestrian = finalWalk <= 250;
       legs.add(
         _walkLeg(
           departure,
@@ -639,6 +780,13 @@ class OfflineRaptorRouter {
           toLat: toLat,
           toLon: toLon,
           fromStop: last,
+          isDirectPedestrian: isDirectPedestrian,
+          geometry: isDirectPedestrian
+              ? [
+                  _placeCoordinates(last, stops),
+                  [toLon, toLat],
+                ]
+              : null,
         ),
       );
     }
@@ -799,6 +947,173 @@ class OfflineRaptorRouter {
       previous['to'] = current['to'];
       legs.removeAt(index);
     }
+  }
+
+  String? _resolveLegTerminus({
+    required _Ride ride,
+    required String routeShortName,
+    required Map<String, dynamic> stops,
+    required Map<String, dynamic> data,
+  }) {
+    final routeId = ride.trip.routeId;
+    final isSunwayLine = routeShortName.toUpperCase().contains('SUNWAY') ||
+        routeShortName.toUpperCase().contains('BRT') ||
+        routeId.contains('B1000') ||
+        routeId.contains('BRT');
+
+    if (isSunwayLine) {
+      final hasTwoDirections = _routeHasTwoDistinctDirections(routeId, ride, data);
+      if (!hasTwoDirections ||
+          ride.trip.headsign.trim().isEmpty ||
+          _isMisleadingSunwayHeadsign(ride)) {
+        return _sunwayLineDirectionTerminus(ride, stops);
+      }
+    }
+
+    if (ride.trip.headsign.trim().isNotEmpty) {
+      return _cleanStationName(ride.trip.headsign.trim());
+    }
+    if (ride.trip.calls.isNotEmpty) {
+      final lastStopId = ride.trip.calls.last.stopId;
+      final raw = _place(lastStopId, stops)['name']?.toString();
+      if (raw != null && raw.isNotEmpty) {
+        return _cleanStationName(raw);
+      }
+    }
+    return null;
+  }
+
+  bool _routeHasTwoDistinctDirections(
+    String routeId,
+    _Ride ride,
+    Map<String, dynamic> data,
+  ) {
+    if (ride.trip.calls.length >= 2 &&
+        ride.trip.calls.first.stopId == ride.trip.calls.last.stopId) {
+      return false;
+    }
+    final tripsRaw = data['trips'];
+    if (tripsRaw is! List) return false;
+    final terminals = <String>{};
+    for (final raw in tripsRaw) {
+      if (raw is List && raw.length >= 5 && raw[1] == routeId) {
+        if (raw.length >= 3 && raw[2] != ride.trip.serviceId) {
+          continue;
+        }
+        final calls = raw[4];
+        if (calls is List && calls.length >= 2) {
+          final first = calls.first;
+          final last = calls.last;
+          if (first is List && last is List) {
+            final start = first[0].toString();
+            final end = last[0].toString();
+            if (start != end) {
+              terminals.add('$start->$end');
+            }
+          }
+        }
+      }
+    }
+    return terminals.length >= 2;
+  }
+
+  bool _isMisleadingSunwayHeadsign(_Ride ride) {
+    final headsign = ride.trip.headsign.toUpperCase();
+    if (headsign.isEmpty) return true;
+    final calls = ride.trip.calls;
+    if (calls.isNotEmpty && ride.fromIndex < ride.toIndex) {
+      final terminalId = calls.last.stopId;
+      if ((terminalId.contains('SETIA') || terminalId.contains('1005840')) &&
+          headsign.contains('USJ')) {
+        return true;
+      }
+      if ((terminalId.contains('USJ') || terminalId.contains('1005834')) &&
+          headsign.contains('SETIA')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _sunwayLineDirectionTerminus(_Ride ride, Map<String, dynamic> stops) {
+    final calls = ride.trip.calls;
+    if (calls.length >= 13) {
+      if (ride.toIndex <= 6) {
+        final stopName = _place(calls[6].stopId, stops)['name']?.toString();
+        if (stopName != null && stopName.isNotEmpty) {
+          return _cleanStationName(stopName);
+        }
+      } else {
+        final stopName = _place(calls.last.stopId, stops)['name']?.toString();
+        if (stopName != null && stopName.isNotEmpty) {
+          return _cleanStationName(stopName);
+        }
+      }
+    }
+
+    if (calls.isNotEmpty && ride.fromIndex < ride.toIndex) {
+      final terminalStopId = calls.last.stopId;
+      final stopName = _place(terminalStopId, stops)['name']?.toString();
+      if (stopName != null && stopName.isNotEmpty) {
+        return _cleanStationName(stopName);
+      }
+    }
+
+    const corridor = [
+      'USJ7',
+      'SOUTH QUAY',
+      'SUNU-MONASH',
+      'SUNMED',
+      'SUNWAY LAGOON',
+      'MENTARI',
+      'SETIA JAYA',
+    ];
+    final fromName = (_place(ride.fromStop, stops)['name'] ?? '')
+        .toString()
+        .toUpperCase();
+    final toName = (_place(ride.toStop, stops)['name'] ?? '')
+        .toString()
+        .toUpperCase();
+    int indexOf(String name) {
+      for (var i = 0; i < corridor.length; i++) {
+        if (name.contains(corridor[i])) return i;
+      }
+      return -1;
+    }
+
+    final fromIdx = indexOf(fromName);
+    final toIdx = indexOf(toName);
+    if (fromIdx != -1 && toIdx != -1 && toIdx < fromIdx) {
+      return 'USJ 7';
+    }
+    return 'Setia Jaya';
+  }
+
+  String _cleanStationName(String raw) {
+    var cleaned = raw
+        .replaceAll(RegExp(r'^STESEN\s+BRT\s+', caseSensitive: false), '')
+        .replaceAll(RegExp(r'^STESEN\s+', caseSensitive: false), '')
+        .trim();
+
+    final toMatches = RegExp(r'\bto\s+', caseSensitive: false).allMatches(cleaned).toList();
+    if (toMatches.isNotEmpty) {
+      cleaned = cleaned.substring(toMatches.last.end).trim();
+    }
+
+    for (final separator in ['→', '->']) {
+      final separatorIndex = cleaned.lastIndexOf(separator);
+      if (separatorIndex >= 0) {
+        cleaned = cleaned.substring(separatorIndex + separator.length).trim();
+      }
+    }
+
+    if (RegExp(r'^USJ\s*7$', caseSensitive: false).hasMatch(cleaned)) {
+      return 'USJ 7';
+    }
+    if (RegExp(r'^(SUNWAY[-\s]*)?SETIA\s*JAYA$', caseSensitive: false).hasMatch(cleaned)) {
+      return 'Setia Jaya';
+    }
+    return cleaned;
   }
 
   List<List<double>> _routeGeometry({
@@ -979,11 +1294,13 @@ class OfflineRaptorRouter {
     double? toLat,
     double? toLon,
     List<List<double>>? geometry,
+    bool isDirectPedestrian = false,
   }) => {
     'mode': 'WALK',
     'startTime': _iso(base, start),
     'endTime': _iso(base, end),
     'isTransferWalk': transfer,
+    if (isDirectPedestrian) 'isDirectPedestrian': true,
     'from': fromStop != null
         ? _place(fromStop, stops)
         : {'name': 'Start', 'lat': fromLat, 'lon': fromLon},
