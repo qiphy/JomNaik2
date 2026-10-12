@@ -33,82 +33,119 @@ class LiveGuidanceCard extends StatelessWidget {
   final VoidCallback onStop;
 
   @override
-  Widget build(BuildContext context) => Card(
-    color: isActive ? const Color(0xFFE8F2FF) : null,
-    child: Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final foregroundColor = isDark
+        ? isActive || isCompleted
+              ? Colors.black
+              : Colors.white
+        : null;
+
+    return Card(
+      color: isActive ? const Color(0xFFE8F2FF) : null,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: DefaultTextStyle.merge(
+          style: TextStyle(color: foregroundColor),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                isCompleted
-                    ? Icons.check_circle_outline
-                    : isActive
-                    ? Icons.navigation
-                    : Icons.navigation_outlined,
-                color: Colors.blue[800],
+              Row(
+                children: [
+                  Icon(
+                    isCompleted
+                        ? Icons.check_circle_outline
+                        : isActive
+                        ? Icons.navigation
+                        : Icons.navigation_outlined,
+                    color: Colors.blue[800],
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      isCompleted
+                          ? 'Trip completed'
+                          : isActive
+                          ? hasCurrentStep
+                                ? 'Live guidance • Step $currentStep of $totalSteps'
+                                : 'Live guidance complete'
+                          : 'Live journey guidance',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  isCompleted
-                      ? 'Trip completed'
-                      : isActive
-                      ? hasCurrentStep
-                            ? 'Live guidance • Step $currentStep of $totalSteps'
-                            : 'Live guidance complete'
-                      : 'Live journey guidance',
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+              const SizedBox(height: 8),
+              Text(message),
+              if (isCompleted && completedTrips > 0) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '$completedTrips completed ${completedTrips == 1 ? 'trip' : 'trips'} saved on this device.',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: foregroundColor),
                 ),
+              ],
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (!isActive && !isCompleted)
+                    FilledButton.icon(
+                      onPressed: onStart,
+                      style: foregroundColor == null
+                          ? null
+                          : FilledButton.styleFrom(
+                              foregroundColor: Colors.black,
+                            ),
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Start guidance'),
+                    ),
+                  if (isActive && showBoardedAction)
+                    FilledButton.icon(
+                      onPressed: onBoarded,
+                      style: foregroundColor == null
+                          ? null
+                          : FilledButton.styleFrom(
+                              foregroundColor: foregroundColor,
+                            ),
+                      icon: const Icon(Icons.directions_bus),
+                      label: const Text('I have boarded'),
+                    ),
+                  if (isActive)
+                    OutlinedButton.icon(
+                      onPressed: isReplanning ? null : onReplan,
+                      style: foregroundColor == null
+                          ? null
+                          : OutlinedButton.styleFrom(
+                              foregroundColor: foregroundColor,
+                            ),
+                      icon: isReplanning
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.alt_route),
+                      label: const Text('Replan from here'),
+                    ),
+                  if (isActive)
+                    TextButton(
+                      onPressed: onStop,
+                      style: foregroundColor == null
+                          ? null
+                          : TextButton.styleFrom(
+                              foregroundColor: foregroundColor,
+                            ),
+                      child: const Text('Stop'),
+                    ),
+                ],
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(message),
-          if (isCompleted && completedTrips > 0) ...[
-            const SizedBox(height: 4),
-            Text(
-              '$completedTrips completed ${completedTrips == 1 ? 'trip' : 'trips'} saved on this device.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              if (!isActive && !isCompleted)
-                FilledButton.icon(
-                  onPressed: onStart,
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Start guidance'),
-                ),
-              if (isActive && showBoardedAction)
-                FilledButton.icon(
-                  onPressed: onBoarded,
-                  icon: const Icon(Icons.directions_bus),
-                  label: const Text('I have boarded'),
-                ),
-              if (isActive)
-                OutlinedButton.icon(
-                  onPressed: isReplanning ? null : onReplan,
-                  icon: isReplanning
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.alt_route),
-                  label: const Text('Replan from here'),
-                ),
-              if (isActive)
-                TextButton(onPressed: onStop, child: const Text('Stop')),
-            ],
-          ),
-        ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

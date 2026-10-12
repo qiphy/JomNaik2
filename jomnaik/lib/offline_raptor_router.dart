@@ -561,7 +561,7 @@ class OfflineRaptorRouter {
         (target[1] as num?)?.toDouble() ?? 0,
         (target[2] as num?)?.toDouble() ?? 0,
       );
-      if (distance <= 300) {
+      if (distance <= 500) {
         links.add([entry.key, math.max(60, (distance / 1.25).round())]);
       }
     }
@@ -917,7 +917,7 @@ class OfflineRaptorRouter {
                 currentFromLat,
                 currentFromLon,
               ) >
-              150) {
+              300) {
         continue;
       }
 
