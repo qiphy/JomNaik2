@@ -72,7 +72,6 @@ String get _backendBaseUrl {
   return _deployedBackendBaseUrl;
 }
 
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (_isSupabaseConfigured) {
@@ -84,8 +83,9 @@ Future<void> main() async {
   runApp(const JomRideApp());
 }
 
-final ValueNotifier<ThemeMode> themeModeNotifier =
-    ValueNotifier<ThemeMode>(ThemeMode.light);
+final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier<ThemeMode>(
+  ThemeMode.light,
+);
 
 class JomRideApp extends StatelessWidget {
   const JomRideApp({super.key});
@@ -207,6 +207,7 @@ class _MapViewState extends State<MapView> {
   bool _routeRequestInFlight = false;
   final Map<String, TimedCache<List<StopDeparture>>> _departureCache = {};
   final Map<String, TimedCache<TrafficCongestion?>> _trafficCache = {};
+  final Map<String, TimedCache<Future<StationCrowd>>> _stationCrowdCache = {};
   bool _isSearchOpen = true;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
@@ -482,13 +483,21 @@ class _MapViewState extends State<MapView> {
           'minzoom': 0,
           'maxzoom': 19,
         };
-        layers.insert(1, satLayer);
+        // Keep the imagery above every land, water, land-use, and building
+        // fill. Inserting at index 1 leaves those opaque fills above the
+        // imagery in the light style. Place it before roads and labels so
+        // those remain legible over the satellite tiles in both themes.
+        final lastFillIndex = layers.lastIndexWhere(
+          (layer) => layer['type'] == 'fill',
+        );
+        layers.insert(lastFillIndex + 1, satLayer);
 
         for (final layer in layers) {
           final id = layer['id']?.toString() ?? '';
           final type = layer['type']?.toString() ?? '';
           final sourceLayer = layer['source-layer']?.toString() ?? '';
-          final paint = (layer['paint'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+          final paint =
+              (layer['paint'] as Map<String, dynamic>?) ?? <String, dynamic>{};
           layer['paint'] = paint;
 
           if (type == 'background') {
@@ -521,7 +530,9 @@ class _MapViewState extends State<MapView> {
         _mapStyleVersion++;
         _dynamicStyleString = jsonEncode(styleData);
       });
-      print('[JomRide][map] Protomaps PMTiles style assigned (dark=$isDark, sat=$_isSatelliteMode)');
+      print(
+        '[JomRide][map] Protomaps PMTiles style assigned (dark=$isDark, sat=$_isSatelliteMode)',
+      );
     } catch (error) {
       debugPrint('Failed to construct dynamic map style: $error');
     }
@@ -673,7 +684,6 @@ class _MapViewState extends State<MapView> {
       _searchPlaces,
     );
   }
-
 
   Future<void> _clearSelectedPlaceMarker() async {
     final marker = _selectedPlaceMarker;
@@ -1180,8 +1190,6 @@ class _MapViewState extends State<MapView> {
         ? rawLegs.whereType<Map>().map(Map<String, dynamic>.from).toList()
         : const [];
   }
-
-
 
   int _durationFromLegs(List<Map<String, dynamic>> legs, int fallback) {
     if (legs.isEmpty) return fallback;
@@ -1847,10 +1855,7 @@ class _MapViewState extends State<MapView> {
       }
 
       final alternatives = _addDirectModeAlternatives(
-        {
-          ...responseData,
-          'itineraries': validItineraries,
-        },
+        {...responseData, 'itineraries': validItineraries},
         fromLat: fromLat,
         fromLon: fromLon,
         toLat: toLat,
@@ -2090,12 +2095,12 @@ class _MapViewState extends State<MapView> {
         final double ageFactor = age <= const Duration(hours: 1)
             ? 1.0
             : age <= const Duration(hours: 3)
-                ? 0.8
-                : age <= const Duration(hours: 6)
-                    ? 0.5
-                    : age <= const Duration(days: 1)
-                        ? 0.25
-                        : 0.1;
+            ? 0.8
+            : age <= const Duration(hours: 6)
+            ? 0.5
+            : age <= const Duration(days: 1)
+            ? 0.25
+            : 0.1;
 
         delay += (baseImpactSeconds * ageFactor).round();
       }
@@ -2201,9 +2206,7 @@ class _MapViewState extends State<MapView> {
       if (item is Map) {
         final itMap = Map<String, dynamic>.from(item);
         if (isItineraryMapAvailableAtDeparture(itMap, when)) {
-          convertedExisting.add(
-            _convertExcessiveWalksToEhailing(itMap),
-          );
+          convertedExisting.add(_convertExcessiveWalksToEhailing(itMap));
         }
       }
     }
@@ -2232,9 +2235,9 @@ class _MapViewState extends State<MapView> {
         ),
       );
     }
-    final firstMileAlternatives = _firstMileEhailingAlternatives(itineraries)
-        .where((alt) => isItineraryMapAvailableAtDeparture(alt, when))
-        .toList();
+    final firstMileAlternatives = _firstMileEhailingAlternatives(
+      itineraries,
+    ).where((alt) => isItineraryMapAvailableAtDeparture(alt, when)).toList();
     itineraries.addAll(firstMileAlternatives);
     // Build final-mile variants from both the original transit routes and
     // first-mile variants, so a single itinerary can use transit for its main
@@ -2242,9 +2245,7 @@ class _MapViewState extends State<MapView> {
     final lastMileAlternatives = _lastMileEhailingAlternatives([
       ...itineraries,
       ...firstMileAlternatives,
-    ])
-        .where((alt) => isItineraryMapAvailableAtDeparture(alt, when))
-        .toList();
+    ]).where((alt) => isItineraryMapAvailableAtDeparture(alt, when)).toList();
     itineraries.addAll(lastMileAlternatives);
 
     final walking = _offlineWalkingItinerary(
@@ -2385,13 +2386,16 @@ class _MapViewState extends State<MapView> {
     final walkingSeconds = legs
         .where((l) => l['mode']?.toString().toUpperCase() == 'WALK')
         .fold<int>(0, (total, leg) {
-      final start = DateTime.tryParse(leg['startTime']?.toString() ?? '');
-      final end = DateTime.tryParse(leg['endTime']?.toString() ?? '');
-      return total +
-          (start != null && end != null ? end.difference(start).inSeconds : 0);
-    });
+          final start = DateTime.tryParse(leg['startTime']?.toString() ?? '');
+          final end = DateTime.tryParse(leg['endTime']?.toString() ?? '');
+          return total +
+              (start != null && end != null
+                  ? end.difference(start).inSeconds
+                  : 0);
+        });
 
-    final previousFareMin = (itinerary['fareMin'] as num?)?.toDouble() ??
+    final previousFareMin =
+        (itinerary['fareMin'] as num?)?.toDouble() ??
         (itinerary['fareAmount'] as num?)?.toDouble() ??
         0.0;
     final previousFareMax =
@@ -2400,14 +2404,14 @@ class _MapViewState extends State<MapView> {
     final fareLabel = hybridFirstMile && hybridLastMile
         ? 'Estimated first and last-mile e-hailing fare'
         : hybridLastMile
-            ? 'Estimated connecting e-hailing fare'
-            : 'Estimated first-mile e-hailing fare';
+        ? 'Estimated connecting e-hailing fare'
+        : 'Estimated first-mile e-hailing fare';
 
     final optionMessage = hybridFirstMile && hybridLastMile
         ? 'E-hailing to the nearest stop and from the last stop, with public transport for the main journey.'
         : hybridLastMile
-            ? 'Public transport with e-hailing for the final mile because the destination is more than 1 km from the last stop.'
-            : 'E-hailing to the nearest stop, followed by public transport. This avoids a long walk to a connecting service.';
+        ? 'Public transport with e-hailing for the final mile because the destination is more than 1 km from the last stop.'
+        : 'E-hailing to the nearest stop, followed by public transport. This avoids a long walk to a connecting service.';
 
     return {
       ...itinerary,
@@ -2427,14 +2431,16 @@ class _MapViewState extends State<MapView> {
   String _itinerarySignature(Map<String, dynamic> itinerary) {
     final rawLegs = itinerary['legs'];
     if (rawLegs is! List) return '';
-    return rawLegs.map((l) {
-      if (l is! Map) return '';
-      final mode = l['mode']?.toString() ?? '';
-      final name = l['routeShortName']?.toString() ?? '';
-      final fromName = l['from'] is Map ? (l['from']['name'] ?? '') : '';
-      final toName = l['to'] is Map ? (l['to']['name'] ?? '') : '';
-      return '$mode:$name:$fromName->$toName';
-    }).join(';');
+    return rawLegs
+        .map((l) {
+          if (l is! Map) return '';
+          final mode = l['mode']?.toString() ?? '';
+          final name = l['routeShortName']?.toString() ?? '';
+          final fromName = l['from'] is Map ? (l['from']['name'] ?? '') : '';
+          final toName = l['to'] is Map ? (l['to']['name'] ?? '') : '';
+          return '$mode:$name:$fromName->$toName';
+        })
+        .join(';');
   }
 
   List<Map<String, dynamic>> _firstMileEhailingAlternatives(
@@ -3319,10 +3325,7 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  void _onMapCreated(
-    MapLibreMapController controller,
-    int styleVersion,
-  ) {
+  void _onMapCreated(MapLibreMapController controller, int styleVersion) {
     ++_mapGeneration;
     _mapController = controller;
     _mapControllerStyleVersion = styleVersion;
@@ -3540,7 +3543,6 @@ class _MapViewState extends State<MapView> {
     setState(() => _nearestTransitStop = stop);
   }
 
-
   void _trackAnonymousStationPresence(Position position) {
     if (!_stationLocationTrackingEnabled ||
         Supabase.instance.client.auth.currentUser == null ||
@@ -3695,8 +3697,7 @@ class _MapViewState extends State<MapView> {
     }
     if (!mounted) return;
 
-    final submission =
-        await showModalBottomSheet<IncidentReportSubmission>(
+    final submission = await showModalBottomSheet<IncidentReportSubmission>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => IncidentTypeSelectionSheet(
@@ -3841,7 +3842,6 @@ class _MapViewState extends State<MapView> {
       stop: stop,
     );
   }
-
 
   Future<void> _showMyLocation() async {
     final controller = _mapController;
@@ -4165,7 +4165,6 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-
   Future<void> _loadAndRenderOfflineStops(
     MapLibreMapController controller,
   ) async {
@@ -4325,7 +4324,9 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  Future<void> _loadAndRenderStationPerimeters(MapLibreMapController controller) async {
+  Future<void> _loadAndRenderStationPerimeters(
+    MapLibreMapController controller,
+  ) async {
     try {
       final response = await _httpClient
           .get(
@@ -4443,9 +4444,9 @@ class _MapViewState extends State<MapView> {
       host: 'open',
       queryParameters: queryParams.isNotEmpty ? queryParams : null,
     );
-    final webUri = Uri.parse('https://r.grab.com/open').replace(
-      queryParameters: queryParams.isNotEmpty ? queryParams : null,
-    );
+    final webUri = Uri.parse(
+      'https://r.grab.com/open',
+    ).replace(queryParameters: queryParams.isNotEmpty ? queryParams : null);
     final isIos = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
     final storeUri = Uri.parse(
       isIos
@@ -4477,10 +4478,7 @@ class _MapViewState extends State<MapView> {
           webOnlyWindowName: '_blank',
         );
       } else {
-        await launchUrl(
-          storeUri,
-          mode: LaunchMode.externalApplication,
-        );
+        await launchUrl(storeUri, mode: LaunchMode.externalApplication);
       }
     } catch (_) {
       try {
@@ -4491,10 +4489,7 @@ class _MapViewState extends State<MapView> {
             webOnlyWindowName: '_blank',
           );
         } else {
-          await launchUrl(
-            storeUri,
-            mode: LaunchMode.externalApplication,
-          );
+          await launchUrl(storeUri, mode: LaunchMode.externalApplication);
         }
       } catch (_) {
         _showMessage('Could not open Grab.');
@@ -4522,10 +4517,8 @@ class _MapViewState extends State<MapView> {
                   children: [
                     Text(
                       'Choose E-hailing Service',
-                      style:
-                          Theme.of(modalContext).textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
+                      style: Theme.of(modalContext).textTheme.titleLarge
+                          ?.copyWith(fontWeight: FontWeight.bold),
                     ),
                     IconButton(
                       icon: const Icon(Icons.close),
@@ -4536,9 +4529,9 @@ class _MapViewState extends State<MapView> {
                 const SizedBox(height: 4),
                 Text(
                   'Connect your route seamlessly with an e-hailing ride:',
-                  style: Theme.of(modalContext).textTheme.bodyMedium?.copyWith(
-                        color: Colors.grey[600],
-                      ),
+                  style: Theme.of(
+                    modalContext,
+                  ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
                 ),
                 const SizedBox(height: 16),
                 ListTile(
@@ -4624,9 +4617,7 @@ class _MapViewState extends State<MapView> {
                     isIos ? 'Search App Store' : 'Search Google Play',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  subtitle: const Text(
-                    'Find more Malaysian e-hailing apps',
-                  ),
+                  subtitle: const Text('Find more Malaysian e-hailing apps'),
                   trailing: const Icon(Icons.arrow_forward_ios, size: 16),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -4652,8 +4643,6 @@ class _MapViewState extends State<MapView> {
       },
     );
   }
-
-
 
   Widget _buildNearestStationCard() {
     final stop = _nearestTransitStop;
@@ -4682,8 +4671,9 @@ class _MapViewState extends State<MapView> {
         ? 'Nearest bus stop'
         : 'Nearest station';
 
-    final crowdFuture =
-        (stop == null || isBus) ? null : _fetchStationCrowd(stop.id);
+    final crowdFuture = (stop == null || isBus)
+        ? null
+        : _getStationCrowd(stop.id);
 
     final colorScheme = Theme.of(context).colorScheme;
     final isCompact = MediaQuery.sizeOf(context).width < 400;
@@ -4755,7 +4745,8 @@ class _MapViewState extends State<MapView> {
           future: crowdFuture,
           builder: (context, snapshot) {
             final crowd = snapshot.data;
-            final info = crowd?.label ??
+            final info =
+                crowd?.label ??
                 (stop.routes.isNotEmpty ? stop.routes : 'Low crowd level');
             return Text(
               '${stop.name} • $info',
@@ -4816,7 +4807,7 @@ class _MapViewState extends State<MapView> {
         (_placeSearchResults.isNotEmpty || _selectedPlace != null);
 
     return Material(
-      color: Colors.white,
+      color: Theme.of(context).colorScheme.surface,
       elevation: 4,
       borderRadius: BorderRadius.circular(16),
       clipBehavior: Clip.antiAlias,
@@ -4945,6 +4936,22 @@ class _MapViewState extends State<MapView> {
     return StationCrowd.fromJson(Map<String, dynamic>.from(data));
   }
 
+  Future<StationCrowd> _getStationCrowd(String stationId) {
+    final cached = _stationCrowdCache[stationId];
+    if (cached != null &&
+        DateTime.now().difference(cached.loadedAt) <
+            const Duration(minutes: 1)) {
+      return cached.value;
+    }
+
+    // Keep the in-flight request as well as its result. The map style reloads
+    // and camera updates can rebuild this card several times in quick
+    // succession; each build should not issue a duplicate crowd request.
+    final request = _fetchStationCrowd(stationId);
+    _stationCrowdCache[stationId] = TimedCache(request);
+    return request;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isOutsideSupportedZone) {
@@ -4997,8 +5004,7 @@ class _MapViewState extends State<MapView> {
                         child: DropdownButton<String>(
                           value: _currentRegion,
                           isExpanded: true,
-                          dropdownColor:
-                              Theme.of(context).colorScheme.surface,
+                          dropdownColor: Theme.of(context).colorScheme.surface,
                           icon: Icon(
                             Icons.expand_more,
                             color: Theme.of(context).colorScheme.onSurface,
@@ -5009,9 +5015,9 @@ class _MapViewState extends State<MapView> {
                               child: Text(
                                 _currentRegion,
                                 style: TextStyle(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurface,
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurface,
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -5059,7 +5065,9 @@ class _MapViewState extends State<MapView> {
                           color: Theme.of(context).colorScheme.onSurface,
                         ),
                         border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                        ),
                       ),
                     ),
                   ),
@@ -5081,7 +5089,8 @@ class _MapViewState extends State<MapView> {
               ValueListenableBuilder<ThemeMode>(
                 valueListenable: themeModeNotifier,
                 builder: (context, mode, _) {
-                  final isDark = mode == ThemeMode.dark ||
+                  final isDark =
+                      mode == ThemeMode.dark ||
                       (mode == ThemeMode.system &&
                           MediaQuery.platformBrightnessOf(context) ==
                               Brightness.dark);
@@ -5188,7 +5197,8 @@ class _MapViewState extends State<MapView> {
                               if (notification is ScrollStartNotification ||
                                   notification is UserScrollNotification) {
                                 _setScrollingCard(true);
-                              } else if (notification is ScrollEndNotification) {
+                              } else if (notification
+                                  is ScrollEndNotification) {
                                 _setScrollingCard(false);
                               }
                               return false;
@@ -5239,8 +5249,9 @@ class _MapViewState extends State<MapView> {
                         ItinerarySheet(
                           itinerary: _currentItinerary!,
                           initialExtent: _itineraryInitialExtent,
-                          weatherReminder:
-                              _weatherItineraryReminder(_currentItinerary!),
+                          weatherReminder: _weatherItineraryReminder(
+                            _currentItinerary!,
+                          ),
                           guidanceCard: _buildJourneyGuidanceCard(),
                           onDismiss: _dismissItinerary,
                           onFindApps: _openEhailingStore,
@@ -5255,10 +5266,15 @@ class _MapViewState extends State<MapView> {
                         ),
                     ],
                   ),
-            ProfilePage(
-              isSupabaseConfigured: _isSupabaseConfigured,
-              onStationLocationTrackingChanged:
-                  _setStationLocationTrackingEnabled,
+            ColoredBox(
+              color: Theme.of(context).brightness == Brightness.dark
+                  ? const Color(0xFF242424)
+                  : Theme.of(context).scaffoldBackgroundColor,
+              child: ProfilePage(
+                isSupabaseConfigured: _isSupabaseConfigured,
+                onStationLocationTrackingChanged:
+                    _setStationLocationTrackingEnabled,
+              ),
             ),
           ],
         ),

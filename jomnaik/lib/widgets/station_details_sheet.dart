@@ -66,6 +66,7 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
   }
 
   Widget _buildCongestionIndicator(TrafficCongestion congestion) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final color = switch (congestion.level) {
       'road_closed' || 'heavy' => Colors.red,
       'moderate' => Colors.orange,
@@ -76,7 +77,7 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: color.shade50,
+        color: isDark ? color.withValues(alpha: 0.18) : color.shade50,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
@@ -121,7 +122,9 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                   ),
                   const SizedBox(height: 12),
                   FilledButton.icon(
-                    onPressed: widget.stop == null ? null : widget.onGetDirections,
+                    onPressed: widget.stop == null
+                        ? null
+                        : widget.onGetDirections,
                     icon: const Icon(Icons.directions),
                     label: const Text('Directions'),
                   ),
@@ -146,32 +149,36 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                       final reportLevel = snapshot.hasError
                           ? 'Unavailable'
                           : snapshot.connectionState != ConnectionState.done
-                              ? 'Loading'
-                              : (reportCount >= 3
-                                  ? 'High incident status'
-                                  : reportCount == 2
-                                      ? 'Medium incident status'
-                                      : 'Low incident status');
+                          ? 'Loading'
+                          : (reportCount >= 3
+                                ? 'High incident status'
+                                : reportCount == 2
+                                ? 'Medium incident status'
+                                : 'Low incident status');
                       final reportColor = snapshot.hasError
                           ? Colors.blueGrey
                           : reportCount >= 3
-                              ? Colors.red
-                              : reportCount == 2
-                                  ? Colors.orange
-                                  : Colors.green;
+                          ? Colors.red
+                          : reportCount == 2
+                          ? Colors.orange
+                          : Colors.green;
                       final reportMessage = snapshot.hasError
                           ? 'Incident report level unavailable.'
                           : snapshot.connectionState != ConnectionState.done
-                              ? 'Loading recent reports…'
-                              : reportCount == 0
-                                  ? 'No reports in the last 15 minutes.'
-                                  : '$reportCount recent report${reportCount == 1 ? '' : 's'}';
+                          ? 'Loading recent reports…'
+                          : reportCount == 0
+                          ? 'No reports in the last 15 minutes.'
+                          : '$reportCount recent report${reportCount == 1 ? '' : 's'}';
+                      final isDark =
+                          Theme.of(context).brightness == Brightness.dark;
                       return Container(
                         width: double.infinity,
                         margin: const EdgeInsets.only(bottom: 20),
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: reportColor.shade50,
+                          color: isDark
+                              ? reportColor.withValues(alpha: 0.18)
+                              : reportColor.shade50,
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: Column(
@@ -210,117 +217,119 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                       );
                     },
                   ),
-                FutureBuilder<TrafficCongestion?>(
-                  future: _congestionFuture,
-                  builder: (context, snapshot) {
-                    final congestion = snapshot.data;
-                    return congestion == null
-                        ? const SizedBox.shrink()
-                        : _buildCongestionIndicator(congestion);
-                  },
-                ),
-                Text(
-                  'Next departures',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                FutureBuilder<List<StopDeparture>>(
-                  future: _departureFuture,
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState != ConnectionState.done) {
-                      return const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 16),
-                        child: Center(child: CircularProgressIndicator()),
-                      );
-                    }
-                    if (snapshot.hasError) {
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Row(
+                  FutureBuilder<TrafficCongestion?>(
+                    future: _congestionFuture,
+                    builder: (context, snapshot) {
+                      final congestion = snapshot.data;
+                      return congestion == null
+                          ? const SizedBox.shrink()
+                          : _buildCongestionIndicator(congestion);
+                    },
+                  ),
+                  Text(
+                    'Next departures',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  FutureBuilder<List<StopDeparture>>(
+                    future: _departureFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 16),
+                          child: Center(child: CircularProgressIndicator()),
+                        );
+                      }
+                      if (snapshot.hasError) {
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: Row(
+                            children: [
+                              const Expanded(
+                                child: Text('Departure times are unavailable.'),
+                              ),
+                              TextButton.icon(
+                                onPressed: () => setState(() => _loadData()),
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Retry'),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+
+                      final nextDepartures = snapshot.data ?? const [];
+                      if (nextDepartures.isEmpty) {
+                        return const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Expanded(
-                              child: Text('Departure times are unavailable.'),
-                            ),
-                            TextButton.icon(
-                              onPressed: () => setState(() => _loadData()),
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Retry'),
+                            Padding(
+                              padding: EdgeInsets.symmetric(vertical: 8),
+                              child: Text('No upcoming scheduled departures.'),
                             ),
                           ],
-                        ),
-                      );
-                    }
-
-                    final nextDepartures = snapshot.data ?? const [];
-                    if (nextDepartures.isEmpty) {
-                      return const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                        );
+                      }
+                      return Column(
                         children: [
-                          Padding(
-                            padding: EdgeInsets.symmetric(vertical: 8),
-                            child: Text('No upcoming scheduled departures.'),
+                          ...nextDepartures.map(
+                            (departure) => ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.schedule),
+                              title: Text(
+                                departure.displayDirection.isNotEmpty
+                                    ? departure.displayDirection
+                                    : departure.route,
+                              ),
+                              subtitle: Text(
+                                [
+                                  if (departure.displayDirection.isNotEmpty)
+                                    departure.route,
+                                  departure.isEstimated
+                                      ? 'Live vehicle estimate'
+                                      : 'Scheduled time',
+                                ].join(' • '),
+                              ),
+                              trailing: departure.isEstimated
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.blue.shade50,
+                                            borderRadius: BorderRadius.circular(
+                                              6,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            departure.minutesRemaining,
+                                            style: TextStyle(
+                                              color: Colors.blue.shade800,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  : Text(
+                                      departure.time,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                            ),
                           ),
                         ],
                       );
-                    }
-                    return Column(
-                      children: [
-                        ...nextDepartures.map(
-                          (departure) => ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: const Icon(Icons.schedule),
-                            title: Text(
-                              departure.displayDirection.isNotEmpty
-                                  ? departure.displayDirection
-                                  : departure.route,
-                            ),
-                            subtitle: Text(
-                              [
-                                if (departure.displayDirection.isNotEmpty)
-                                  departure.route,
-                                departure.isEstimated
-                                    ? 'Live vehicle estimate'
-                                    : 'Scheduled time',
-                              ].join(' • '),
-                            ),
-                            trailing: departure.isEstimated
-                                ? Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 3,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.blue.shade50,
-                                          borderRadius:
-                                              BorderRadius.circular(6),
-                                        ),
-                                        child: Text(
-                                          departure.minutesRemaining,
-                                          style: TextStyle(
-                                            color: Colors.blue.shade800,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  )
-                                : Text(
-                                    departure.time,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
+                    },
+                  ),
                 ],
               ),
             ),

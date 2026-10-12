@@ -573,7 +573,16 @@ async def traffic(
 async def station_crowd(station_id: str) -> dict[str, Any]:
     """Estimate crowd level from recent anonymous station-presence reports."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(503, "Crowd data is not configured")
+        logger.warning("Crowd data is not configured; returning low fallback")
+        return {
+            "stationId": station_id,
+            "level": "low",
+            "observedUsers": 0,
+            "capacity": None,
+            "windowMinutes": 30,
+            "confidence": "low",
+            "available": False,
+        }
     since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -607,7 +616,15 @@ async def station_crowd(station_id: str) -> dict[str, Any]:
                     capacity = rows[0].get("capacity")
     except httpx.HTTPError as error:
         logger.exception("Could not read crowd data for station %s", station_id)
-        raise HTTPException(503, "Crowd data is temporarily unavailable") from error
+        return {
+            "stationId": station_id,
+            "level": "low",
+            "observedUsers": 0,
+            "capacity": None,
+            "windowMinutes": 30,
+            "confidence": "low",
+            "available": False,
+        }
     rows = presence_response.json()
     observed_users = len(rows) if isinstance(rows, list) else 0
     if isinstance(capacity, int) and capacity > 0:
@@ -622,6 +639,7 @@ async def station_crowd(station_id: str) -> dict[str, Any]:
         "capacity": capacity,
         "windowMinutes": 30,
         "confidence": "low" if capacity is None else "medium",
+        "available": True,
     }
 
 
