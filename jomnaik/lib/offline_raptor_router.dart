@@ -100,6 +100,8 @@ class OfflineRaptorRouter {
       preferred: fromStopId,
       maxDistanceMeters: 3000,
       walkingSpeed: walkingSpeed,
+      targetLat: toLat,
+      targetLon: toLon,
     );
 
     final walkableDestinations = _nearby(
@@ -315,8 +317,9 @@ class OfflineRaptorRouter {
     final candidates = <({_Label label, String destination})>[];
     for (var round = 0; round < 4; round++) {
       final next = Map<String, _Label>.from(labels);
+      final stops = Map<String, dynamic>.from(data['stops'] as Map);
       for (final trip in activeTrips) {
-        _scanTrip(trip, labels, next);
+        _scanTrip(trip, labels, next, stops, fromLat, fromLon);
       }
       _applyTransfers(next, data);
       for (final stop in destination) {
@@ -341,7 +344,9 @@ class OfflineRaptorRouter {
       ].join('|');
       final existing = uniqueCandidates[signature];
       if (existing == null ||
-          candidate.label.arrival < existing.label.arrival) {
+          candidate.label.arrival < existing.label.arrival ||
+          (candidate.label.arrival == existing.label.arrival &&
+              candidate.label.initialWalkSeconds < existing.label.initialWalkSeconds)) {
         uniqueCandidates[signature] = candidate;
       }
     }
@@ -403,6 +408,8 @@ class OfflineRaptorRouter {
     String? preferred,
     double maxDistanceMeters = 800,
     double walkingSpeed = 1.25,
+    double? targetLat,
+    double? targetLon,
   }) {
     final choices = <_NearbyStop>[];
     final preferredId = _resolveStopId(preferred, stops);
@@ -425,16 +432,30 @@ class OfflineRaptorRouter {
       return choices;
     }
 
+    final directDistToTarget = (targetLat != null && targetLon != null)
+        ? _distance(lat, lon, targetLat, targetLon)
+        : null;
+
     for (final entry in stops.entries) {
       final stop = entry.value;
       if (stop is! List || stop.length < 3) continue;
+      final stopLat = (stop[1] as num).toDouble();
+      final stopLon = (stop[2] as num).toDouble();
       final distance = _distance(
         lat,
         lon,
-        (stop[1] as num).toDouble(),
-        (stop[2] as num).toDouble(),
+        stopLat,
+        stopLon,
       );
       if (distance <= maxDistanceMeters) {
+        // Do not route via hybrid e-hailing to a far away station in the opposite
+        // direction of the destination (where distance to destination increases).
+        if (distance > 1000 && directDistToTarget != null) {
+          final stopDistToTarget = _distance(stopLat, stopLon, targetLat!, targetLon!);
+          if (stopDistToTarget > directDistToTarget + 400) {
+            continue;
+          }
+        }
         choices.add(
           _NearbyStop(
             entry.key,
@@ -465,6 +486,9 @@ class OfflineRaptorRouter {
     _Trip trip,
     Map<String, _Label> previous,
     Map<String, _Label> next,
+    Map<String, dynamic> stops,
+    double fromLat,
+    double fromLon,
   ) {
     _Boarding? boarding;
     for (var index = 0; index < trip.calls.length; index++) {
@@ -482,6 +506,20 @@ class OfflineRaptorRouter {
               : boarding.departure - trip.calls[boarding.index].departure;
           if (currentOffset == null || offset < currentOffset) {
             boarding = _Boarding(index, departure, label);
+          } else if (offset == currentOffset && boarding != null) {
+            // For the exact same vehicle run, prefer boarding at a stop closer to the
+            // passenger's origin to prevent sending the user backwards to a distant station.
+            final currStopData = stops[call.stopId] as List?;
+            final boardStopData = stops[trip.calls[boarding.index].stopId] as List?;
+            final currDist = currStopData != null && currStopData.length >= 3
+                ? _distance(fromLat, fromLon, (currStopData[1] as num).toDouble(), (currStopData[2] as num).toDouble())
+                : double.infinity;
+            final boardDist = boardStopData != null && boardStopData.length >= 3
+                ? _distance(fromLat, fromLon, (boardStopData[1] as num).toDouble(), (boardStopData[2] as num).toDouble())
+                : double.infinity;
+            if (currDist < boardDist || label.initialWalkSeconds < boarding.label.initialWalkSeconds) {
+              boarding = _Boarding(index, departure, label);
+            }
           }
         }
       }
@@ -634,6 +672,26 @@ class OfflineRaptorRouter {
         : 0.0;
 
     if (initialDistance > 1000) {
+      // Backtracking check: if the user took e-hailing to a distant station, ensure the
+      // transit service does not ride back past a stop closer to the origin.
+      if (label.rides.isNotEmpty) {
+        final firstRide = label.rides.first;
+        for (var n = firstRide.fromIndex + 1; n <= firstRide.toIndex; n++) {
+          final interData = stops[firstRide.trip.calls[n].stopId] as List?;
+          if (interData != null && interData.length >= 3) {
+            final interDist = _distance(
+              fromLat,
+              fromLon,
+              (interData[1] as num).toDouble(),
+              (interData[2] as num).toDouble(),
+            );
+            if (interDist < initialDistance - 300) {
+              return const {'itineraries': <Map<String, dynamic>>[]};
+            }
+          }
+        }
+      }
+
       final hailSeconds = math.max(300, (initialDistance / 9.7).round() + 180);
       legs.add({
         'mode': 'HAIL',

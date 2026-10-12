@@ -2007,6 +2007,7 @@ class _MapViewState extends State<MapView> {
     Map<String, dynamic> routeData,
   ) async {
     routeData = await _applyTomTomTrafficEstimates(routeData);
+    routeData = await _applyLiveBusEstimates(routeData);
     try {
       final response = await _httpClient
           .get(
@@ -2206,6 +2207,106 @@ class _MapViewState extends State<MapView> {
         }
         return itinerary;
       }).toList(),
+    };
+  }
+
+  Future<Map<String, dynamic>> _applyLiveBusEstimates(
+    Map<String, dynamic> routeData,
+  ) async {
+    final itineraries = routeData['itineraries'];
+    if (itineraries is! List) return routeData;
+
+    final departureRequests = <String, Future<List<StopDeparture>>>{};
+
+    for (final rawItinerary in itineraries) {
+      if (rawItinerary is! Map || rawItinerary['legs'] is! List) continue;
+      for (final rawLeg in rawItinerary['legs'] as List) {
+        if (rawLeg is! Map) continue;
+        final mode = rawLeg['mode']?.toString().toUpperCase();
+        if (mode != 'BUS') continue;
+
+        final from = rawLeg['from'];
+        final stopId = from is Map
+            ? (from['stopId']?.toString() ?? from['id']?.toString())
+            : null;
+        if (stopId != null && stopId.isNotEmpty) {
+          departureRequests.putIfAbsent(
+            stopId,
+            () => _fetchNextDepartures(stopId).catchError(
+              (_) => const <StopDeparture>[],
+            ),
+          );
+        }
+      }
+    }
+
+    if (departureRequests.isEmpty) return routeData;
+
+    final departuresByStop = <String, List<StopDeparture>>{};
+    for (final entry in departureRequests.entries) {
+      try {
+        departuresByStop[entry.key] = await entry.value;
+      } catch (_) {
+        departuresByStop[entry.key] = const <StopDeparture>[];
+      }
+    }
+
+    final updatedItineraries = <Map<String, dynamic>>[];
+    for (final rawItinerary in itineraries) {
+      if (rawItinerary is! Map || rawItinerary['legs'] is! List) {
+        if (rawItinerary is Map) {
+          updatedItineraries.add(Map<String, dynamic>.from(rawItinerary));
+        }
+        continue;
+      }
+
+      final legs = (rawItinerary['legs'] as List).map((l) {
+        if (l is! Map) return l;
+        final legMap = Map<String, dynamic>.from(l);
+        final mode = legMap['mode']?.toString().toUpperCase();
+        if (mode == 'BUS') {
+          final from = legMap['from'];
+          final stopId = from is Map
+              ? (from['stopId']?.toString() ?? from['id']?.toString())
+              : null;
+          final routeName = legMap['routeShortName']?.toString().trim() ?? '';
+          if (stopId != null && departuresByStop.containsKey(stopId)) {
+            final deps = departuresByStop[stopId]!;
+            final estimatedDep = deps.firstWhere(
+              (d) =>
+                  d.isEstimated &&
+                  routeName.isNotEmpty &&
+                  (d.route.toLowerCase() == routeName.toLowerCase() ||
+                      routeName.toLowerCase().contains(d.route.toLowerCase()) ||
+                      d.route.toLowerCase().contains(routeName.toLowerCase())),
+              orElse: () => const StopDeparture(
+                route: '',
+                time: '',
+                timestamp: 0,
+                isEstimated: false,
+                direction: '',
+              ),
+            );
+            if (estimatedDep.isEstimated && estimatedDep.timestamp > 0) {
+              legMap['liveBusEstimate'] = {
+                'timestamp': estimatedDep.timestamp,
+                'trafficAdjusted': false,
+              };
+            }
+          }
+        }
+        return legMap;
+      }).toList();
+
+      updatedItineraries.add({
+        ...Map<String, dynamic>.from(rawItinerary),
+        'legs': legs,
+      });
+    }
+
+    return {
+      ...routeData,
+      'itineraries': updatedItineraries,
     };
   }
 

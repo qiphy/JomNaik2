@@ -437,7 +437,7 @@ async def _add_live_bus_departures(
         distance_km = _distance_km(
             lat, lon, float(nearest_stop[1]), float(nearest_stop[2])
         )
-        if distance_km > 8:
+        if distance_km > 4:
             continue
         bearing = vehicle.get("bearing")
         if (
@@ -451,7 +451,7 @@ async def _add_live_bus_departures(
                 float(nearest_stop[2]),
             )
             difference = abs((float(bearing) - bearing_to_stop + 180) % 360 - 180)
-            if difference > 120:
+            if difference > 90:
                 continue
         speed = vehicle.get("speedMps")
         speed_mps = float(speed) if isinstance(speed, (int, float)) and speed > 2 else 8.0
@@ -504,35 +504,41 @@ async def _add_live_bus_departures(
     estimates = list(estimates_by_route.values())
     existing = value.get("departures", [])
     scheduled = existing if isinstance(existing, list) else []
-    if is_brt_station and estimates:
-        # Let B1000 movement refine the next BRT arrival, while keeping later
-        # scheduled departures visible as timetable fallback/options.
-        combined = list(estimates)
-        for item in scheduled:
-            same_service_prediction = any(
-                str(item.get("route", "")).casefold()
-                == str(estimate.get("route", "")).casefold()
-                and abs(int(item.get("timestamp", 0)) - int(estimate.get("timestamp", 0)))
-                <= 180_000
-                for estimate in estimates
+
+    # For transit to buses, prioritize estimated arrival time first;
+    # if no estimate is available for a service, fall back to scheduled time.
+    combined = list(estimates)
+    for item in scheduled:
+        same_service_prediction = any(
+            str(item.get("route", "")).casefold()
+            == str(estimate.get("route", "")).casefold()
+            and (
+                not item.get("terminal")
+                or not estimate.get("terminal")
+                or str(item.get("terminal", "")).casefold()
+                == str(estimate.get("terminal", "")).casefold()
             )
-            if not same_service_prediction:
-                combined.append(item)
-    else:
-        # For ordinary bus stops, live vehicle arrivals remain the primary
-        # display; use the timetable when no usable vehicle estimate exists.
-        combined = list(estimates) if estimates else scheduled
+            and abs(int(item.get("timestamp", 0)) - int(estimate.get("timestamp", 0)))
+            <= 300_000
+            for estimate in estimates
+        )
+        if not same_service_prediction:
+            combined.append(item)
     combined.sort(key=lambda item: item.get("timestamp", 0))
+
+    has_estimates = bool(estimates)
+    has_scheduled = any(not item.get("is_estimated") for item in combined)
+    source_label = (
+        "data.gov.my GTFS-Realtime and GTFS timetable"
+        if has_estimates and has_scheduled
+        else "data.gov.my GTFS-Realtime bus positions"
+        if has_estimates
+        else "GTFS static timetable"
+    )
     return {
         **value,
         "departures": combined[: max(1, min(limit, 20))],
-        "source": (
-            "data.gov.my GTFS-Realtime B1000 and GTFS timetable"
-            if is_brt_station and estimates
-            else "data.gov.my GTFS-Realtime bus positions"
-            if estimates
-            else "GTFS static timetable"
-        ),
+        "source": source_label,
         "realtimeBusConfigured": True,
     }
 

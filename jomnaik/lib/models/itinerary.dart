@@ -239,7 +239,7 @@ class LiveBusEstimate {
 }
 
 class ItineraryPlace {
-  const ItineraryPlace({required this.name, this.lat, this.lon});
+  const ItineraryPlace({required this.name, this.lat, this.lon, this.stopId});
 
   static ItineraryPlace? fromJsonOrNull(dynamic value) {
     if (value is! Map || value['name'] == null) return null;
@@ -247,12 +247,14 @@ class ItineraryPlace {
       name: value['name'].toString(),
       lat: value['lat'] is num ? (value['lat'] as num).toDouble() : null,
       lon: value['lon'] is num ? (value['lon'] as num).toDouble() : null,
+      stopId: value['stopId']?.toString(),
     );
   }
 
   final String name;
   final double? lat;
   final double? lon;
+  final String? stopId;
 }
 
 class IntermediateStop {
