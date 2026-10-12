@@ -50,6 +50,8 @@ const _privacyStorage = FlutterSecureStorage();
 
 enum _StartChoice { currentLocation, search, map }
 
+enum _MapLayerAction { satellite, toggleTheme }
+
 bool get _isSupabaseConfigured =>
     _supabaseUrl.isNotEmpty && _supabasePublishableKey.isNotEmpty;
 
@@ -4012,22 +4014,73 @@ class _MapViewState extends State<MapView> {
     ], null);
     if (features == null || features.isEmpty) return;
 
-    final feature = features.first;
-    if (feature is! Map || feature['properties'] is! Map) return;
+    final stopsAtTap = <String, TransitStop>{};
+    for (final feature in features) {
+      if (feature is! Map || feature['properties'] is! Map) continue;
+      final id = (feature['properties'] as Map)['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      final stop = _transitStopsById[id] ?? TransitStop.fromGeoJson(feature);
+      if (stop != null) stopsAtTap.putIfAbsent(stop.id, () => stop);
+    }
+    if (stopsAtTap.isEmpty) return;
 
-    final properties = feature['properties'] as Map;
-    final stopId = properties['id']?.toString();
-    if (stopId == null || stopId.isEmpty) return;
-    final stopName = properties['name']?.toString() ?? 'Selected stop';
-    final routes =
-        properties['routes']?.toString() ?? 'Route information unavailable';
-    final transitType = properties['transit_type']?.toString() ?? 'transit';
-    final stop = _transitStopsById[stopId];
+    final railStops = stopsAtTap.values
+        .where((candidate) => candidate.transitType == 'rail')
+        .toList();
+    final firstRailStop = railStops.isEmpty ? null : railStops.first;
+    var stop = firstRailStop ?? stopsAtTap.values.first;
+    if (firstRailStop != null) {
+      final normalizedName = firstRailStop.name.trim().toLowerCase();
+      final sameStationLines = stopsAtTap.values
+          .where(
+            (candidate) =>
+                candidate.transitType == 'rail' &&
+                candidate.name.trim().toLowerCase() == normalizedName,
+          )
+          .toList();
+      if (sameStationLines.length > 1) {
+        final selectedStop = await showModalBottomSheet<TransitStop>(
+          context: context,
+          showDragHandle: true,
+          builder: (sheetContext) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    firstRailStop.name,
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  const Text('Choose the rail line for this station.'),
+                  const SizedBox(height: 12),
+                  ...sameStationLines.map(
+                    (candidate) => ListTile(
+                      leading: const Icon(Icons.train),
+                      title: Text(candidate.routes),
+                      subtitle: Text(candidate.id),
+                      onTap: () => Navigator.of(sheetContext).pop(candidate),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        if (selectedStop == null) return;
+        stop = selectedStop;
+      }
+    }
+
     await _showStopDetails(
-      stopId: stopId,
-      stopName: stopName,
-      routes: routes,
-      transitType: transitType,
+      stopId: stop.id,
+      stopName: stop.name,
+      routes: stop.routes.isEmpty
+          ? 'Route information unavailable'
+          : stop.routes,
+      transitType: stop.transitType,
       stop: stop,
     );
   }
@@ -5112,49 +5165,7 @@ class _MapViewState extends State<MapView> {
                   ),
                 )
               : Text(isMapTab ? 'JomNaik' : 'Profile'),
-          actions: [
-            if (isMapTab) ...[
-              IconButton(
-                tooltip: _isSatelliteMode
-                    ? 'Switch to standard map'
-                    : 'Switch to satellite imagery',
-                icon: Icon(
-                  _isSatelliteMode
-                      ? Icons.map_outlined
-                      : Icons.satellite_alt_outlined,
-                  color:
-                      _isSatelliteMode &&
-                          Theme.of(context).brightness == Brightness.light
-                      ? Colors.white
-                      : null,
-                ),
-                onPressed: _toggleSatellite,
-              ),
-              ValueListenableBuilder<ThemeMode>(
-                valueListenable: themeModeNotifier,
-                builder: (context, mode, _) {
-                  final isDark =
-                      mode == ThemeMode.dark ||
-                      (mode == ThemeMode.system &&
-                          MediaQuery.platformBrightnessOf(context) ==
-                              Brightness.dark);
-                  return IconButton(
-                    tooltip: isDark
-                        ? 'Switch to light mode'
-                        : 'Switch to dark mode',
-                    icon: Icon(
-                      isDark
-                          ? Icons.light_mode_outlined
-                          : Icons.dark_mode_outlined,
-                      color: _isSatelliteMode && !isDark ? Colors.white : null,
-                    ),
-                    onPressed: _toggleTheme,
-                  );
-                },
-              ),
-              const SizedBox(width: 4),
-            ],
-          ],
+          actions: const [],
           backgroundColor: isMapTab ? Colors.transparent : null,
           surfaceTintColor: Colors.transparent,
           elevation: 0,
@@ -5346,6 +5357,65 @@ class _MapViewState extends State<MapView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  Material(
+                    color: Theme.of(context).colorScheme.surface,
+                    elevation: 3,
+                    shape: CircleBorder(
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.outlineVariant,
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: PopupMenuButton<_MapLayerAction>(
+                      tooltip: 'Map layers',
+                      icon: const Icon(Icons.layers_outlined),
+                      onSelected: (action) {
+                        switch (action) {
+                          case _MapLayerAction.satellite:
+                            _toggleSatellite();
+                            break;
+                          case _MapLayerAction.toggleTheme:
+                            _toggleTheme();
+                            break;
+                        }
+                      },
+                      itemBuilder: (context) {
+                        final isDark =
+                            Theme.of(context).brightness == Brightness.dark;
+                        return [
+                          PopupMenuItem(
+                            value: _MapLayerAction.satellite,
+                            child: Row(
+                              children: [
+                                const Icon(Icons.satellite_alt_outlined),
+                                const SizedBox(width: 12),
+                                const Expanded(
+                                  child: Text('Satellite imagery'),
+                                ),
+                                if (_isSatelliteMode)
+                                  const Icon(Icons.check, size: 18),
+                              ],
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: _MapLayerAction.toggleTheme,
+                            child: Row(
+                              children: [
+                                Icon(
+                                  isDark
+                                      ? Icons.light_mode_outlined
+                                      : Icons.dark_mode_outlined,
+                                ),
+                                const SizedBox(width: 12),
+                                Text(isDark ? 'Light mode' : 'Dark mode'),
+                              ],
+                            ),
+                          ),
+                        ];
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   FloatingActionButton.small(
                     heroTag: 'show-north',
                     onPressed: _mapController == null ? null : _showNorth,

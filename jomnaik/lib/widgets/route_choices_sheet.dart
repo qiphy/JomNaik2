@@ -19,27 +19,6 @@ class RouteChoicesSheet extends StatelessWidget {
         : const [];
   }
 
-  List<Map<String, dynamic>> _uniqueRouteOptions() {
-    // The caller ranks itineraries before opening this sheet, so the first
-    // itinerary for each type is the best-ranked option in that category.
-    final optionsByType = <String, Map<String, dynamic>>{};
-    for (final itinerary in itineraries) {
-      optionsByType.putIfAbsent(_routeOptionTitle(itinerary), () => itinerary);
-    }
-
-    const displayOrder = [
-      'E-hailing',
-      'Mostly rail',
-      'Mostly bus',
-      'Hybrid',
-      'Walk',
-    ];
-    return displayOrder
-        .where(optionsByType.containsKey)
-        .map((type) => optionsByType[type]!)
-        .toList();
-  }
-
   String _routeOptionTitle(Map<String, dynamic> itinerary) {
     switch (itinerary['routeCategory']?.toString().toLowerCase()) {
       case 'rail':
@@ -129,7 +108,7 @@ class RouteChoicesSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final routeOptions = _uniqueRouteOptions();
+    final routeOptions = itineraries;
     final maxHeight = MediaQuery.sizeOf(context).height * 0.82;
     final hasTransit = routeOptions.any((it) {
       final rawLegs = it['legs'];
