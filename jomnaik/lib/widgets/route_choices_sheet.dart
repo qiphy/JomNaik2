@@ -32,10 +32,12 @@ class RouteChoicesSheet extends StatelessWidget {
       case 'walking':
         return 'Walking';
     }
-    final modes = _itineraryLegs(itinerary)
-        .map((leg) => leg['mode']?.toString().toUpperCase())
-        .toSet();
-    final hasTransit = modes.any((mode) => {'RAIL', 'SUBWAY', 'TRAM', 'BUS'}.contains(mode));
+    final modes = _itineraryLegs(
+      itinerary,
+    ).map((leg) => leg['mode']?.toString().toUpperCase()).toSet();
+    final hasTransit = modes.any(
+      (mode) => {'RAIL', 'SUBWAY', 'TRAM', 'BUS'}.contains(mode),
+    );
     if (modes.contains('HAIL') && hasTransit) return 'Hybrid';
     if (modes.contains('HAIL')) return 'E-hailing';
     final hasBus = modes.contains('BUS');
@@ -64,9 +66,17 @@ class RouteChoicesSheet extends StatelessWidget {
   }
 
   String _routeOptionSummary(Map<String, dynamic> itinerary) {
+    final isHybrid = _routeOptionTitle(itinerary) == 'Hybrid';
     final services = _itineraryLegs(itinerary)
-        .where((leg) => !{'WALK', 'HAIL'}.contains(leg['mode']?.toString().toUpperCase()))
-        .map((leg) => leg['routeShortName']?.toString())
+        .where((leg) {
+          final mode = leg['mode']?.toString().toUpperCase();
+          return mode != 'WALK' && (isHybrid || mode != 'HAIL');
+        })
+        .map((leg) {
+          final mode = leg['mode']?.toString().toUpperCase();
+          if (isHybrid && mode == 'HAIL') return 'E-hailing';
+          return leg['routeShortName']?.toString();
+        })
         .whereType<String>()
         .where((name) => name.isNotEmpty)
         .toList();
@@ -75,11 +85,18 @@ class RouteChoicesSheet extends StatelessWidget {
           leg['mode']?.toString().toUpperCase() == 'WALK' &&
           leg['isSheltered'] == true,
     );
-    final summary = services.isEmpty ? 'Direct journey estimate' : services.join(' → ');
+    final summary = services.isEmpty
+        ? 'Direct journey estimate'
+        : services.join(' → ');
     final congestion = itinerary['congestion'];
-    final stationActivity = congestion is Map ? congestion['stationActivity'] : null;
-    final hasBusyStation = stationActivity is List &&
-        stationActivity.any((station) => station is Map && station['level'] == 'high');
+    final stationActivity = congestion is Map
+        ? congestion['stationActivity']
+        : null;
+    final hasBusyStation =
+        stationActivity is List &&
+        stationActivity.any(
+          (station) => station is Map && station['level'] == 'high',
+        );
     final signals = <String>[
       if (sheltered) 'Sheltered walkways',
       if (hasBusyStation) 'Busy station reported',
@@ -189,7 +206,9 @@ class RouteChoicesSheet extends StatelessWidget {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
                         side: BorderSide(
-                          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+                          color: theme.colorScheme.outlineVariant.withValues(
+                            alpha: 0.5,
+                          ),
                         ),
                       ),
                       child: ListTile(
@@ -200,7 +219,8 @@ class RouteChoicesSheet extends StatelessWidget {
                         leading: Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: theme.colorScheme.primaryContainer.withValues(alpha: 0.6),
+                            color: theme.colorScheme.primaryContainer
+                                .withValues(alpha: 0.6),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Icon(
@@ -212,7 +232,9 @@ class RouteChoicesSheet extends StatelessWidget {
                           children: [
                             Text(
                               _routeOptionTitle(itinerary),
-                              style: const TextStyle(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                             if (option.legs.any(
                               (leg) => leg.incidentReports.isNotEmpty,
@@ -239,7 +261,9 @@ class RouteChoicesSheet extends StatelessWidget {
                           children: [
                             Text(
                               formatDuration(option.duration),
-                              style: const TextStyle(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                             if (fareLabel(option).isNotEmpty)
                               Text(
