@@ -19,8 +19,29 @@ class RouteChoicesSheet extends StatelessWidget {
         : const [];
   }
 
+  List<Map<String, dynamic>> _uniqueRouteOptions() {
+    // The caller ranks itineraries before opening this sheet, so the first
+    // itinerary for each type is the best-ranked option in that category.
+    final optionsByType = <String, Map<String, dynamic>>{};
+    for (final itinerary in itineraries) {
+      optionsByType.putIfAbsent(_routeOptionTitle(itinerary), () => itinerary);
+    }
+
+    const displayOrder = [
+      'E-hailing',
+      'Mostly rail',
+      'Mostly bus',
+      'Hybrid',
+      'Walk',
+    ];
+    return displayOrder
+        .where(optionsByType.containsKey)
+        .map((type) => optionsByType[type]!)
+        .toList();
+  }
+
   String _routeOptionTitle(Map<String, dynamic> itinerary) {
-    switch (itinerary['routeCategory']?.toString()) {
+    switch (itinerary['routeCategory']?.toString().toLowerCase()) {
       case 'rail':
         return 'Mostly rail';
       case 'bus':
@@ -30,7 +51,8 @@ class RouteChoicesSheet extends StatelessWidget {
       case 'hybrid':
         return 'Hybrid';
       case 'walking':
-        return 'Walking';
+      case 'walk':
+        return 'Walk';
     }
     final modes = _itineraryLegs(
       itinerary,
@@ -47,7 +69,7 @@ class RouteChoicesSheet extends StatelessWidget {
     if (hasBus && hasRail) return 'Mostly rail';
     if (hasRail) return 'Mostly rail';
     if (hasBus) return 'Mostly bus';
-    return 'Walking';
+    return 'Walk';
   }
 
   IconData _routeOptionIcon(Map<String, dynamic> itinerary) {
@@ -107,8 +129,9 @@ class RouteChoicesSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final routeOptions = _uniqueRouteOptions();
     final maxHeight = MediaQuery.sizeOf(context).height * 0.82;
-    final hasTransit = itineraries.any((it) {
+    final hasTransit = routeOptions.any((it) {
       final rawLegs = it['legs'];
       if (rawLegs is! List) return false;
       return rawLegs.any((leg) {
@@ -140,7 +163,7 @@ class RouteChoicesSheet extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          '${itineraries.length} options available',
+                          '${routeOptions.length} options available',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
@@ -196,9 +219,9 @@ class RouteChoicesSheet extends StatelessWidget {
                 child: ListView.builder(
                   shrinkWrap: true,
                   physics: const BouncingScrollPhysics(),
-                  itemCount: itineraries.length,
+                  itemCount: routeOptions.length,
                   itemBuilder: (context, index) {
-                    final itinerary = itineraries[index];
+                    final itinerary = routeOptions[index];
                     final option = Itinerary.fromJson(itinerary);
                     return Card(
                       margin: const EdgeInsets.only(bottom: 10),
