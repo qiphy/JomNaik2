@@ -48,6 +48,6 @@ jobs:
         run: |
           git config user.name 'jomnaik-gtfs-bot'
           git config user.email 'actions@github.com'
-          git add -f jomnaik/assets/offline/raptor_klang_valley.json jomnaik/assets/offline/raptor_manifest.json
+          git add -f jomnaik/assets/offline/raptor_klang_valley.json jomnaik_backend/data/raptor_klang_valley.json jomnaik/assets/offline/raptor_manifest.json
           git diff --cached --quiet || git commit -m 'chore: refresh offline GTFS timetable'
           git push

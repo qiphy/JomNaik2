@@ -72,7 +72,11 @@ def main() -> None:
             for row in read_rows(archive, "routes.txt"):
                 routes[f"{feed}:{row['route_id']}"] = [row.get("route_short_name") or row.get("route_long_name") or "Service", row.get("route_long_name") or "", int(row.get("route_type") or 3)]
             for row in read_rows(archive, "calendar.txt"):
-                calendars[f"{feed}:{row['service_id']}"] = [row.get(day) == "1" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")] + [row.get("start_date", "00000000"), row.get("end_date", "99999999")]
+                start_date = row.get("start_date", "00000000")
+                end_date = row.get("end_date", "99999999")
+                if feed == "ktmb" and end_date < "20271231":
+                    end_date = "20271231"
+                calendars[f"{feed}:{row['service_id']}"] = [row.get(day) == "1" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")] + [start_date, end_date]
             for row in read_rows(archive, "calendar_dates.txt"):
                 exceptions[f"{feed}:{row['service_id']}"][row.get("date", "")] = int(row.get("exception_type") or 0)
             stop_times: dict[str, list[tuple[int, str, int, int]]] = defaultdict(list)
@@ -99,7 +103,7 @@ def main() -> None:
     for index, (left_id, left) in enumerate(indexed):
         for right_id, right in indexed[index + 1 :]:
             distance = meters((left[1], left[2]), (right[1], right[2]))
-            if distance <= 90:
+            if distance <= 150:
                 duration = max(60, round(distance / 1.2))
                 transfer_map[left_id][right_id] = duration
                 transfer_map[right_id][left_id] = duration
@@ -129,8 +133,12 @@ def main() -> None:
         "transfers": {stop: [[target, duration] for target, duration in links.items()] for stop, links in transfer_map.items()},
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(document, separators=(",", ":")))
-    print(f"Wrote {OUT}: {len(stops)} stops, {len(trips)} trips, {sum(len(v) for v in transfer_map.values())} transfers")
+    serialized = json.dumps(document, separators=(",", ":"))
+    OUT.write_text(serialized)
+    backend_out = BACKEND / "data/raptor_klang_valley.json"
+    backend_out.parent.mkdir(parents=True, exist_ok=True)
+    backend_out.write_text(serialized)
+    print(f"Wrote {OUT} and {backend_out}: {len(stops)} stops, {len(trips)} trips, {sum(len(v) for v in transfer_map.values())} transfers")
 
 
 if __name__ == "__main__":

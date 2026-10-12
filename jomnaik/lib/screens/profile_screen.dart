@@ -1,5 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+const String _feedbackFormUrl = 'https://forms.cloud.microsoft/r/SB4zLXrhJP';
+
+Future<void> _launchFeedbackForm(BuildContext context) async {
+  final uri = Uri.parse(_feedbackFormUrl);
+  try {
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the feedback form.')),
+      );
+    }
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the feedback form.')),
+      );
+    }
+  }
+}
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({
@@ -210,6 +231,17 @@ class _ProfilePageState extends State<ProfilePage> {
                       : 'New to JomNaik? Sign up',
                 ),
               ),
+              const SizedBox(height: 24),
+              const Divider(),
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.feedback_outlined),
+                title: const Text('Give feedback'),
+                subtitle: const Text('Share your thoughts or suggest improvements'),
+                trailing: const Icon(Icons.open_in_new, size: 20),
+                onTap: () => _launchFeedbackForm(context),
+              ),
             ],
           ),
         );
@@ -374,6 +406,15 @@ class _SignedInProfileState extends State<SignedInProfile> {
               ],
               onChanged: _isSavingAccessibility ? null : _setAccessibilityMode,
             ),
+            const SizedBox(height: 16),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.feedback_outlined),
+              title: const Text('Give feedback'),
+              subtitle: const Text('Share your thoughts or suggest improvements'),
+              trailing: const Icon(Icons.open_in_new, size: 20),
+              onTap: () => _launchFeedbackForm(context),
+            ),
             const Spacer(),
             OutlinedButton.icon(
               onPressed: () => Supabase.instance.client.auth.signOut(),
@@ -411,6 +452,12 @@ class SupabaseSetupNotice extends StatelessWidget {
             const Text(
               'Add this app\'s Supabase URL and publishable key when building the app to enable sign-in and sign-up.',
               textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+            OutlinedButton.icon(
+              onPressed: () => _launchFeedbackForm(context),
+              icon: const Icon(Icons.feedback_outlined),
+              label: const Text('Give feedback'),
             ),
           ],
         ),

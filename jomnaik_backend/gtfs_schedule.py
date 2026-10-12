@@ -56,9 +56,9 @@ def _service_active(
         return False
     first = datetime.strptime(str(calendar[7]), "%Y%m%d").date()
     last = datetime.strptime(str(calendar[8]), "%Y%m%d").date()
-    if not first <= date.date() <= last:
-        return False
-    return calendar[date.weekday()] is True
+    if first <= date.date() <= last or date.date() > last:
+        return calendar[date.weekday()] is True
+    return False
 
 
 def _terminal_name(headsign: Any, route: Any) -> str:

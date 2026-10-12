@@ -208,6 +208,7 @@ class _MapViewState extends State<MapView> {
   int _placeSearchRequestId = 0;
   DateTime? _lastLocationWorkAt;
   bool _routeRequestInFlight = false;
+  bool _isSearchingRoute = false;
   final Map<String, TimedCache<List<StopDeparture>>> _departureCache = {};
   final Map<String, TimedCache<TrafficCongestion?>> _trafficCache = {};
   final Map<String, TimedCache<Future<StationCrowd>>> _stationCrowdCache = {};
@@ -1777,6 +1778,7 @@ class _MapViewState extends State<MapView> {
   }) async {
     if (_routeRequestInFlight) return null;
     _routeRequestInFlight = true;
+    if (mounted) setState(() => _isSearchingRoute = true);
     try {
       final when = departure ?? DateTime.now();
       final requestBody = <String, dynamic>{
@@ -1930,6 +1932,7 @@ class _MapViewState extends State<MapView> {
       return null;
     } finally {
       _routeRequestInFlight = false;
+      if (mounted) setState(() => _isSearchingRoute = false);
     }
   }
 
@@ -2007,7 +2010,9 @@ class _MapViewState extends State<MapView> {
     Map<String, dynamic> routeData,
   ) async {
     routeData = await _applyTomTomTrafficEstimates(routeData);
-    routeData = await _applyLiveBusEstimates(routeData);
+    // For bus routes, journey times are calculated based on only scheduled
+    // timetable times once the user reaches the bus stop. Live bus estimates
+    // are not applied to route planning.
     try {
       final response = await _httpClient
           .get(
@@ -3407,9 +3412,10 @@ class _MapViewState extends State<MapView> {
         toLon,
       );
       if (isWalking &&
-          straightDistance <= 500 &&
-          (routedDistance > straightDistance * 2.0 ||
-              routedDistance > straightDistance + 350)) {
+          ((straightDistance <= 1200 &&
+                  (routedDistance > straightDistance * 2.2 ||
+                      routedDistance > straightDistance + 400)) ||
+              (routedDistance > straightDistance * 3.0))) {
         print(
           '[JomRide][route] Suppressed off-road highway detour for pedestrian leg '
           '(straight=${straightDistance.toStringAsFixed(1)}m, routed=${routedDistance.toStringAsFixed(1)}m). '
@@ -5526,8 +5532,10 @@ class _MapViewState extends State<MapView> {
           elevation: 0,
           scrolledUnderElevation: 0,
         ),
-        body: IndexedStack(
-          index: _selectedTab,
+        body: Stack(
+          children: [
+            IndexedStack(
+              index: _selectedTab,
           children: [
             _dynamicStyleString == null
                 ? const Center(child: CircularProgressIndicator())
@@ -5695,6 +5703,52 @@ class _MapViewState extends State<MapView> {
             ),
           ],
         ),
+        if (_isSearchingRoute)
+          Positioned.fill(
+            child: ColoredBox(
+              color: Colors.black.withValues(alpha: 0.55),
+              child: Center(
+                child: Card(
+                  elevation: 8,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 26,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: CircularProgressIndicator(strokeWidth: 3.5),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          'Searching routes...',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Finding the best options for your journey',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedTab,
           onDestinationSelected: _selectTab,

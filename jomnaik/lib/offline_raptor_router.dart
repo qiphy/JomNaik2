@@ -576,11 +576,14 @@ class OfflineRaptorRouter {
     }
   }
 
+  bool _isRailId(String id) =>
+      id.startsWith('rapid-kl-rail:') || id.startsWith('ktmb:');
+
   List<List<Object>> _nearbyRailTransfers(
     String sourceId,
     Map<String, dynamic> stops,
   ) {
-    if (!sourceId.startsWith('rapid-kl-rail:')) return const [];
+    if (!_isRailId(sourceId)) return const [];
     final source = stops[sourceId];
     if (source is! List || source.length < 3) return const [];
     final sourceLat = (source[1] as num?)?.toDouble();
@@ -588,7 +591,7 @@ class OfflineRaptorRouter {
     if (sourceLat == null || sourceLon == null) return const [];
     final links = <List<Object>>[];
     for (final entry in stops.entries) {
-      if (entry.key == sourceId || !entry.key.startsWith('rapid-kl-rail:')) {
+      if (entry.key == sourceId || !_isRailId(entry.key)) {
         continue;
       }
       final target = entry.value;
@@ -623,9 +626,10 @@ class OfflineRaptorRouter {
     if (exception == 2) return false;
     final calendar = (data['calendars'] as Map?)?[serviceId];
     if (calendar is! List) return true;
-    return ymd.compareTo(calendar[7].toString()) >= 0 &&
-        ymd.compareTo(calendar[8].toString()) <= 0 &&
-        calendar[date.weekday - 1] == true;
+    final startStr = calendar[7].toString();
+    final endStr = calendar[8].toString();
+    final isWithinOrPast = ymd.compareTo(startStr) >= 0;
+    return isWithinOrPast && calendar[date.weekday - 1] == true;
   }
 
   _Trip _shiftTripByDay(_Trip trip, int deltaSeconds) => _Trip(
