@@ -790,7 +790,10 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  Future<void> _showLongPressedLocation(LatLng coordinate) async {
+  Future<void> _showLongPressedLocation(
+    dynamic point,
+    LatLng coordinate,
+  ) async {
     if (_currentItinerary != null ||
         _isCardExpanded ||
         _isStationDetailsOpen ||
@@ -802,7 +805,17 @@ class _MapViewState extends State<MapView> {
       return;
     }
     try {
-      final place = await _reverseGeocodePlace(coordinate);
+      final stop = await _transitStopAtMapPoint(point);
+      final place = stop == null
+          ? await _reverseGeocodePlace(coordinate)
+          : PlaceSearchResult(
+              name: stop.name,
+              address:
+                  'Coordinates: ${stop.lat.toStringAsFixed(6)}, ${stop.lon.toStringAsFixed(6)}',
+              lat: stop.lat,
+              lon: stop.lon,
+              stopId: stop.id,
+            );
       if (!mounted) return;
       FocusScope.of(context).unfocus();
       setState(() {
@@ -813,6 +826,28 @@ class _MapViewState extends State<MapView> {
     } catch (_) {
       if (mounted) _showMessage('Could not look up that map location.');
     }
+  }
+
+  Future<TransitStop?> _transitStopAtMapPoint(dynamic point) async {
+    final features = await _mapController?.queryRenderedFeatures(point, [
+      'rail_stop_hit_targets_layer',
+      'bus_stop_hit_targets_layer',
+      'rail_stops_layer',
+      'transit_stops_layer',
+    ], null);
+    if (features == null) return null;
+
+    for (final feature in features) {
+      if (feature is! Map || feature['properties'] is! Map) continue;
+      final properties = feature['properties'] as Map;
+      final id = properties['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      final knownStop = _transitStopsById[id];
+      if (knownStop != null) return knownStop;
+      final parsedStop = TransitStop.fromGeoJson(feature);
+      if (parsedStop != null) return parsedStop;
+    }
+    return null;
   }
 
   Future<void> _selectPlace(PlaceSearchResult place) async {
@@ -5118,8 +5153,8 @@ class _MapViewState extends State<MapView> {
                           onMapClick: (point, coordinate) =>
                               _handleMapStartPick(point, coordinate),
                           featureTapsTriggersMapClick: false,
-                          onMapLongClick: (_, coordinate) =>
-                              _showLongPressedLocation(coordinate),
+                          onMapLongClick: (point, coordinate) =>
+                              _showLongPressedLocation(point, coordinate),
                           onCameraMove: _onCameraMove,
                           onCameraIdle: _onCameraIdle,
                           styleString: _dynamicStyleString!,
