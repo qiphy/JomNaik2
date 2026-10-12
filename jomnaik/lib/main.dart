@@ -148,12 +148,19 @@ class _MapViewState extends State<MapView> {
   // otherwise try to update a controller after the view has been detached
   // (for example after a full rebuild or changing tabs).
   int _mapGeneration = 0;
+  int _mapControllerStyleVersion = -1;
   final http.Client _httpClient = http.Client();
   String? _dynamicStyleString;
   Map<String, dynamic>? _cachedRawStyle;
+  Map<String, dynamic>? _cachedDarkRawStyle;
   int _mapStyleVersion = 0;
+  int _styleRequestGeneration = 0;
+  int _initializedMapGeneration = -1;
   bool _isSatelliteMode = false;
   bool _isCardExpanded = false;
+  bool _isStationDetailsOpen = false;
+  bool _suppressMapTapFromOverlay = false;
+  Timer? _mapTapSuppressionTimer;
   bool _isUsingCurrentLocation = true;
   Itinerary? _currentItinerary;
   Map<String, dynamic>? _currentRawItinerary;
@@ -222,6 +229,18 @@ class _MapViewState extends State<MapView> {
         }
       });
     }
+  }
+
+  void _beginOverlayInteraction() {
+    _mapTapSuppressionTimer?.cancel();
+    _suppressMapTapFromOverlay = true;
+  }
+
+  void _endOverlayInteraction() {
+    _mapTapSuppressionTimer?.cancel();
+    _mapTapSuppressionTimer = Timer(const Duration(milliseconds: 350), () {
+      _suppressMapTapFromOverlay = false;
+    });
   }
 
   bool get _canReportIncident => _isSupabaseConfigured;
@@ -321,6 +340,7 @@ class _MapViewState extends State<MapView> {
     _placeSearchDebounce?.cancel();
     _weatherDebounce?.cancel();
     _scrollCardDebounce?.cancel();
+    _mapTapSuppressionTimer?.cancel();
     _placeSearchFocusNode.dispose();
     _placeSearchController.dispose();
     _httpClient.close();
@@ -393,6 +413,13 @@ class _MapViewState extends State<MapView> {
         throw const FormatException('Map style must be a JSON object.');
       }
       _cachedRawStyle = styleData;
+      final darkStyleData = jsonDecode(
+        await rootBundle.loadString('assets/style/protomaps_dark.json'),
+      );
+      if (darkStyleData is! Map<String, dynamic>) {
+        throw const FormatException('Dark map style must be a JSON object.');
+      }
+      _cachedDarkRawStyle = darkStyleData;
       await _updateMapStyle();
     } catch (error) {
       debugPrint('Could not prepare offline map style: $error');
@@ -421,17 +448,23 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _updateMapStyle() async {
-    final base = _cachedRawStyle;
+    final requestGeneration = ++_styleRequestGeneration;
+    final isDark = themeModeNotifier.value == ThemeMode.dark;
+    final base = isDark
+        ? (_cachedDarkRawStyle ?? _cachedRawStyle)
+        : _cachedRawStyle;
     if (base == null) return;
     try {
       final styleData = jsonDecode(jsonEncode(base)) as Map<String, dynamic>;
       final sources = styleData['sources'] as Map<String, dynamic>;
       final tileUrl = await mapTilesSourceUrl();
-      if (sources['protomaps'] is Map<String, dynamic>) {
-        (sources['protomaps'] as Map<String, dynamic>)['url'] = tileUrl;
+      for (final source in sources.values) {
+        if (source is Map<String, dynamic> && source['type'] == 'vector') {
+          source['url'] = tileUrl;
+        }
       }
+      if (!mounted || requestGeneration != _styleRequestGeneration) return;
 
-      final isDark = themeModeNotifier.value == ThemeMode.dark;
       final layers = (styleData['layers'] as List).cast<Map<String, dynamic>>();
 
       if (_isSatelliteMode) {
@@ -479,54 +512,11 @@ class _MapViewState extends State<MapView> {
             paint['icon-opacity'] = 1.0;
           }
         }
-      } else if (isDark) {
-        for (final layer in layers) {
-          final id = layer['id']?.toString() ?? '';
-          final type = layer['type']?.toString() ?? '';
-          final sourceLayer = layer['source-layer']?.toString() ?? '';
-          final paint = (layer['paint'] as Map<String, dynamic>?) ?? <String, dynamic>{};
-          layer['paint'] = paint;
-
-          if (type == 'background') {
-            paint['background-color'] = '#0f172a';
-          } else if (id == 'earth') {
-            paint['fill-color'] = '#131b2e';
-          } else if (id == 'water') {
-            paint['fill-color'] = '#0a101d';
-          } else if (id == 'landcover') {
-            paint['fill-color'] = '#102220';
-          } else if (sourceLayer == 'buildings') {
-            paint['fill-color'] = '#182030';
-            paint['fill-opacity'] = 0.6;
-          } else if (sourceLayer == 'roads' && type == 'line') {
-            // In dark mode, render roads in dark colors rather than white,
-            // while keeping roads and labels legible against the dark map background.
-            final isMajor = id.contains('motorway') ||
-                id.contains('trunk') ||
-                id.contains('primary');
-            final isSecondary =
-                id.contains('secondary') || id.contains('tertiary');
-            final isCasing = id.contains('casing') || id.contains('tunnel');
-
-            if (isCasing) {
-              paint['line-color'] = '#162030';
-            } else if (isMajor) {
-              paint['line-color'] = '#384964';
-            } else if (isSecondary) {
-              paint['line-color'] = '#2a374b';
-            } else {
-              paint['line-color'] = '#1f2a3a';
-            }
-          } else if (type == 'symbol') {
-            paint['text-color'] = '#e2e8f0';
-            paint['text-halo-color'] = '#0f172a';
-            paint['text-halo-width'] = 1.5;
-          }
-        }
       }
-      // Light mode: keeps the authentic previous design of protomaps_light.json unmodified!
+      // Light and dark modes use their own bundled Protomaps themes. Both
+      // point at the same local PMTiles source so the map remains offline.
 
-      if (!mounted) return;
+      if (!mounted || requestGeneration != _styleRequestGeneration) return;
       setState(() {
         _mapStyleVersion++;
         _dynamicStyleString = jsonEncode(styleData);
@@ -801,7 +791,12 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _showLongPressedLocation(LatLng coordinate) async {
-    if (_currentItinerary != null || _isCardExpanded) return;
+    if (_currentItinerary != null ||
+        _isCardExpanded ||
+        _isStationDetailsOpen ||
+        _suppressMapTapFromOverlay) {
+      return;
+    }
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
       _showUnsupportedZone();
       return;
@@ -977,7 +972,12 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _handleMapStartPick(dynamic point, LatLng coordinate) async {
-    if (_currentItinerary != null || _isCardExpanded) return;
+    if (_currentItinerary != null ||
+        _isCardExpanded ||
+        _isStationDetailsOpen ||
+        _suppressMapTapFromOverlay) {
+      return;
+    }
     final picker = _mapStartPicker;
     if (picker == null || picker.isCompleted) return;
     if (!_isSupportedCoordinate(coordinate.latitude, coordinate.longitude)) {
@@ -3284,33 +3284,50 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  Future<void> _onMapCreated(MapLibreMapController controller) async {
-    final generation = ++_mapGeneration;
+  void _onMapCreated(
+    MapLibreMapController controller,
+    int styleVersion,
+  ) {
+    ++_mapGeneration;
     _mapController = controller;
+    _mapControllerStyleVersion = styleVersion;
     // Annotation handles belong to a specific MapLibre instance. Recreate
     // the blue location marker when the map view is rebuilt.
     _userLocationMarker = null;
     _userLocationHalo = null;
     print(
       '[JomRide][map] MapLibre controller created '
-      '(web=$kIsWeb, generation=$generation, styleReady=${_dynamicStyleString != null})',
+      '(web=$kIsWeb, generation=$_mapGeneration, styleReady=${_dynamicStyleString != null})',
     );
     print(
       '[JomRide][map] Initial camera target=3.1390,101.6868 zoom=12; '
       'source=Protomaps PMTiles',
     );
-    try {
-      await controller.getStyle();
-      print('[JomRide][map] MapLibre style reported as loaded');
-    } catch (error) {
-      print('[JomRide][map] MapLibre style failed to load: $error');
-    }
+  }
 
-    await _loadAndRenderOfflineRailLines();
+  void _onMapStyleLoaded(int styleVersion) {
+    if (styleVersion != _mapStyleVersion ||
+        styleVersion != _mapControllerStyleVersion) {
+      return;
+    }
+    final controller = _mapController;
+    final generation = _mapGeneration;
+    if (controller == null || _initializedMapGeneration == generation) return;
+    _initializedMapGeneration = generation;
+    unawaited(_initializeMapStyle(controller, generation));
+  }
+
+  Future<void> _initializeMapStyle(
+    MapLibreMapController controller,
+    int generation,
+  ) async {
     if (!mounted || generation != _mapGeneration) return;
-    await _loadAndRenderOfflineStops();
+    print('[JomRide][map] MapLibre style reported as loaded');
+    await _loadAndRenderOfflineRailLines(controller);
     if (!mounted || generation != _mapGeneration) return;
-    await _loadAndRenderStationPerimeters();
+    await _loadAndRenderOfflineStops(controller);
+    if (!mounted || generation != _mapGeneration) return;
+    await _loadAndRenderStationPerimeters(controller);
     if (!mounted || generation != _mapGeneration) return;
     _scheduleWeather(const CameraPosition(target: LatLng(3.1390, 101.6868)));
     await _startLocationTracking();
@@ -3870,7 +3887,9 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  Future<void> _loadAndRenderOfflineRailLines() async {
+  Future<void> _loadAndRenderOfflineRailLines(
+    MapLibreMapController controller,
+  ) async {
     try {
       final geoJson = jsonDecode(
         await rootBundle.loadString('assets/transit/rail_lines.geojson'),
@@ -3880,11 +3899,13 @@ class _MapViewState extends State<MapView> {
         return;
       }
 
-      await _mapController?.addSource(
+      if (!mounted || !identical(controller, _mapController)) return;
+      await controller.addSource(
         'offline_rail_lines_source',
         GeojsonSourceProperties(data: geoJson),
       );
-      await _mapController?.addLineLayer(
+      if (!mounted || !identical(controller, _mapController)) return;
+      await controller.addLineLayer(
         'offline_rail_lines_source',
         'offline_rail_lines_layer',
         const LineLayerProperties(
@@ -3904,7 +3925,12 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _queryTappedFeature(dynamic point) async {
-    if (_currentItinerary != null || _isCardExpanded) return;
+    if (_currentItinerary != null ||
+        _isCardExpanded ||
+        _isStationDetailsOpen ||
+        _suppressMapTapFromOverlay) {
+      return;
+    }
     final features = await _mapController?.queryRenderedFeatures(point, [
       'rail_stop_hit_targets_layer',
       'bus_stop_hit_targets_layer',
@@ -3924,7 +3950,7 @@ class _MapViewState extends State<MapView> {
         properties['routes']?.toString() ?? 'Route information unavailable';
     final transitType = properties['transit_type']?.toString() ?? 'transit';
     final stop = _transitStopsById[stopId];
-    _showStopDetails(
+    await _showStopDetails(
       stopId: stopId,
       stopName: stopName,
       routes: routes,
@@ -3933,36 +3959,42 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  void _showStopDetails({
+  Future<void> _showStopDetails({
     required String stopId,
     required String stopName,
     required String routes,
     required String transitType,
     TransitStop? stop,
-  }) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => StationDetailsSheet(
-        stopId: stopId,
-        stopName: stopName,
-        routes: routes,
-        transitType: transitType,
-        stop: stop,
-        onGetDirections: () {
-          Navigator.of(context).pop();
-          if (stop != null) {
-            _getDirectionsToPlace(stop.asPlaceSearchResult());
-          }
-        },
-        fetchDepartures: () => _fetchNextDepartures(stopId),
-        fetchCongestion: () => stop == null
-            ? Future<TrafficCongestion?>.value(null)
-            : _fetchTrafficCongestion(stopId, stop.lat, stop.lon),
-        fetchIncidents: () => _fetchStopIncidents(stopId, stop),
-      ),
-    );
+  }) async {
+    if (_isStationDetailsOpen || !mounted) return;
+    setState(() => _isStationDetailsOpen = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (context) => StationDetailsSheet(
+          stopId: stopId,
+          stopName: stopName,
+          routes: routes,
+          transitType: transitType,
+          stop: stop,
+          onGetDirections: () {
+            Navigator.of(context).pop();
+            if (stop != null) {
+              _getDirectionsToPlace(stop.asPlaceSearchResult());
+            }
+          },
+          fetchDepartures: () => _fetchNextDepartures(stopId),
+          fetchCongestion: () => stop == null
+              ? Future<TrafficCongestion?>.value(null)
+              : _fetchTrafficCongestion(stopId, stop.lat, stop.lon),
+          fetchIncidents: () => _fetchStopIncidents(stopId, stop),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isStationDetailsOpen = false);
+    }
     return;
   }
 
@@ -4099,7 +4131,9 @@ class _MapViewState extends State<MapView> {
   }
 
 
-  Future<void> _loadAndRenderOfflineStops() async {
+  Future<void> _loadAndRenderOfflineStops(
+    MapLibreMapController controller,
+  ) async {
     try {
       final geoJson =
           await _loadBackendStopsGeoJson() ??
@@ -4131,12 +4165,12 @@ class _MapViewState extends State<MapView> {
 
       // Prefer the current FastAPI catalogue; bundled stops keep the map useful
       // when the service is unavailable.
-      await _mapController?.addSource(
+      await controller.addSource(
         "offline_stops_source",
         GeojsonSourceProperties(data: geoJson),
       );
 
-      await _mapController?.addCircleLayer(
+      await controller.addCircleLayer(
         "offline_stops_source",
         "rail_stops_layer",
         const CircleLayerProperties(
@@ -4152,7 +4186,7 @@ class _MapViewState extends State<MapView> {
         ],
         minzoom: 11,
       );
-      await _mapController?.addCircleLayer(
+      await controller.addCircleLayer(
         "offline_stops_source",
         "transit_stops_layer",
         const CircleLayerProperties(
@@ -4170,7 +4204,7 @@ class _MapViewState extends State<MapView> {
       );
       // Invisible circles make small stop markers much easier to tap without
       // changing their visible size.
-      await _mapController?.addCircleLayer(
+      await controller.addCircleLayer(
         "offline_stops_source",
         "rail_stop_hit_targets_layer",
         const CircleLayerProperties(
@@ -4185,7 +4219,7 @@ class _MapViewState extends State<MapView> {
         ],
         minzoom: 11,
       );
-      await _mapController?.addCircleLayer(
+      await controller.addCircleLayer(
         "offline_stops_source",
         "bus_stop_hit_targets_layer",
         const CircleLayerProperties(
@@ -4256,7 +4290,7 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  Future<void> _loadAndRenderStationPerimeters() async {
+  Future<void> _loadAndRenderStationPerimeters(MapLibreMapController controller) async {
     try {
       final response = await _httpClient
           .get(
@@ -4283,7 +4317,7 @@ class _MapViewState extends State<MapView> {
           'geometry': perimeter,
         });
       }
-      if (features.isEmpty || _mapController == null) return;
+      if (features.isEmpty || !identical(controller, _mapController)) return;
 
       // A map may be recreated after a hot restart, so layers are replaced
       // defensively rather than assuming this method only runs once.
@@ -4292,25 +4326,25 @@ class _MapViewState extends State<MapView> {
         'station_perimeter_fill',
       ]) {
         try {
-          await _mapController!.removeLayer(layer);
+          await controller.removeLayer(layer);
         } catch (_) {}
       }
       try {
-        await _mapController!.removeSource('station_perimeter_source');
+        await controller.removeSource('station_perimeter_source');
       } catch (_) {}
-      await _mapController!.addSource(
+      await controller.addSource(
         'station_perimeter_source',
         GeojsonSourceProperties(
           data: {'type': 'FeatureCollection', 'features': features},
         ),
       );
-      await _mapController!.addFillLayer(
+      await controller.addFillLayer(
         'station_perimeter_source',
         'station_perimeter_fill',
         const FillLayerProperties(fillColor: '#94A3B8', fillOpacity: 0.22),
         minzoom: 14,
       );
-      await _mapController!.addLineLayer(
+      await controller.addLineLayer(
         'station_perimeter_source',
         'station_perimeter_outline',
         const LineLayerProperties(lineColor: '#64748B', lineWidth: 1.5),
@@ -4883,6 +4917,7 @@ class _MapViewState extends State<MapView> {
     }
     final isMapTab = _selectedTab == 0;
     final itineraryIsOpen = _selectedTab == 0 && _currentItinerary != null;
+    final mapStyleVersion = _mapStyleVersion;
     final viewportWidth = MediaQuery.sizeOf(context).width;
     return PopScope(
       canPop: !itineraryIsOpen,
@@ -5043,40 +5078,59 @@ class _MapViewState extends State<MapView> {
                 ? const Center(child: CircularProgressIndicator())
                 : Stack(
                     children: [
-                      MapLibreMap(
-                        key: ValueKey('map_style_$_mapStyleVersion'),
-                        initialCameraPosition: const CameraPosition(
-                          target: LatLng(3.1390, 101.6868),
-                          zoom: 12,
+                      IgnorePointer(
+                        // A modal station sheet can leave the native iOS map
+                        // view in the platform gesture arena. IgnorePointer
+                        // blocks that native view until the sheet is gone.
+                        ignoring: _isStationDetailsOpen,
+                        child: MapLibreMap(
+                          key: ValueKey('map_style_$_mapStyleVersion'),
+                          initialCameraPosition: const CameraPosition(
+                            target: LatLng(3.1390, 101.6868),
+                            zoom: 12,
+                          ),
+                          // Weather is keyed to the visible map centre.
+                          trackCameraPosition: true,
+                          scrollGesturesEnabled:
+                              !_isScrollingCard &&
+                              !_isCardExpanded &&
+                              !_isStationDetailsOpen,
+                          zoomGesturesEnabled:
+                              !_isScrollingCard &&
+                              !_isCardExpanded &&
+                              !_isStationDetailsOpen,
+                          rotateGesturesEnabled:
+                              !_isScrollingCard &&
+                              !_isCardExpanded &&
+                              !_isStationDetailsOpen,
+                          tiltGesturesEnabled:
+                              !_isScrollingCard &&
+                              !_isCardExpanded &&
+                              !_isStationDetailsOpen,
+                          doubleClickZoomEnabled:
+                              !_isScrollingCard &&
+                              !_isCardExpanded &&
+                              !_isStationDetailsOpen,
+                          onMapCreated: (controller) =>
+                              _onMapCreated(controller, mapStyleVersion),
+                          onStyleLoadedCallback: () =>
+                              _onMapStyleLoaded(mapStyleVersion),
+                          onMapClick: (point, coordinate) =>
+                              _handleMapStartPick(point, coordinate),
+                          featureTapsTriggersMapClick: false,
+                          onMapLongClick: (_, coordinate) =>
+                              _showLongPressedLocation(coordinate),
+                          onCameraMove: _onCameraMove,
+                          onCameraIdle: _onCameraIdle,
+                          styleString: _dynamicStyleString!,
+                          compassEnabled: false,
+                          compassViewPosition: kIsWeb
+                              ? CompassViewPosition.topRight
+                              : CompassViewPosition.bottomRight,
+                          compassViewMargins: kIsWeb
+                              ? null
+                              : const Point(16, 160),
                         ),
-                        // Weather is keyed to the visible map centre.
-                        trackCameraPosition: true,
-                        scrollGesturesEnabled:
-                            !_isScrollingCard && !_isCardExpanded,
-                        zoomGesturesEnabled:
-                            !_isScrollingCard && !_isCardExpanded,
-                        rotateGesturesEnabled:
-                            !_isScrollingCard && !_isCardExpanded,
-                        tiltGesturesEnabled:
-                            !_isScrollingCard && !_isCardExpanded,
-                        doubleClickZoomEnabled:
-                            !_isScrollingCard && !_isCardExpanded,
-                        onMapCreated: _onMapCreated,
-                        onMapClick: (point, coordinate) =>
-                            _handleMapStartPick(point, coordinate),
-                        featureTapsTriggersMapClick: false,
-                        onMapLongClick: (_, coordinate) =>
-                            _showLongPressedLocation(coordinate),
-                        onCameraMove: _onCameraMove,
-                        onCameraIdle: _onCameraIdle,
-                        styleString: _dynamicStyleString!,
-                        compassEnabled: false,
-                        compassViewPosition: kIsWeb
-                            ? CompassViewPosition.topRight
-                            : CompassViewPosition.bottomRight,
-                        compassViewMargins: kIsWeb
-                            ? null
-                            : const Point(16, 160),
                       ),
                       if (_isCardExpanded)
                         Positioned.fill(
@@ -5106,9 +5160,18 @@ class _MapViewState extends State<MapView> {
                             },
                             child: Listener(
                               behavior: HitTestBehavior.opaque,
-                              onPointerDown: (_) => _setScrollingCard(true),
-                              onPointerUp: (_) => _setScrollingCard(false),
-                              onPointerCancel: (_) => _setScrollingCard(false),
+                              onPointerDown: (_) {
+                                _beginOverlayInteraction();
+                                _setScrollingCard(true);
+                              },
+                              onPointerUp: (_) {
+                                _endOverlayInteraction();
+                                _setScrollingCard(false);
+                              },
+                              onPointerCancel: (_) {
+                                _endOverlayInteraction();
+                                _setScrollingCard(false);
+                              },
                               onPointerSignal: (event) {
                                 if (event is PointerScrollEvent) {
                                   _setScrollingCard(true);

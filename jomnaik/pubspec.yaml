@@ -67,6 +67,7 @@ flutter:
   assets:
     - assets/tiles/klang_valley.pmtiles
     - assets/style/protomaps_light.json
+    - assets/style/protomaps_dark.json
     - assets/style/minimal_style.json
     - assets/transit/
     - assets/65f71978-dde6-4d73-86a7-767322b8edbb/Rapid KL.geojson
