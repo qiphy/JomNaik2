@@ -493,7 +493,6 @@ class _MapViewState extends State<MapView> {
         layers.insert(lastFillIndex + 1, satLayer);
 
         for (final layer in layers) {
-          final id = layer['id']?.toString() ?? '';
           final type = layer['type']?.toString() ?? '';
           final sourceLayer = layer['source-layer']?.toString() ?? '';
           final paint =
@@ -502,11 +501,10 @@ class _MapViewState extends State<MapView> {
 
           if (type == 'background') {
             paint['background-color'] = '#000000';
-          } else if (id == 'earth' ||
-              id == 'water' ||
-              id == 'landcover' ||
-              sourceLayer == 'buildings' ||
-              sourceLayer == 'landuse') {
+          } else if (type == 'fill') {
+            // The light and dark styles use different source IDs and include
+            // slightly different fill layers. Hide every base fill so none
+            // can cover the satellite raster in either theme.
             paint['fill-opacity'] = 0.0;
           } else if (sourceLayer == 'roads' && type == 'line') {
             // In satellite view, make road lines transparent or sufficiently subtle
@@ -2306,12 +2304,7 @@ class _MapViewState extends State<MapView> {
             from['lon'] is num &&
             to['lat'] is num &&
             to['lon'] is num) {
-          final dist = Geolocator.distanceBetween(
-            (from['lat'] as num).toDouble(),
-            (from['lon'] as num).toDouble(),
-            (to['lat'] as num).toDouble(),
-            (to['lon'] as num).toDouble(),
-          );
+          final dist = _walkingLegDistanceMeters(first);
           if (dist > 1000) {
             final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
             final start =
@@ -2324,6 +2317,7 @@ class _MapViewState extends State<MapView> {
               'startTime': start.toIso8601String(),
               'endTime': end.toIso8601String(),
               'routeShortName': 'E-hailing to nearest stop',
+              'distanceMeters': dist,
               'paymentMethod': 'Pay in the e-hailing app',
               'isFirstMile': true,
             };
@@ -2349,12 +2343,7 @@ class _MapViewState extends State<MapView> {
             from['lon'] is num &&
             to['lat'] is num &&
             to['lon'] is num) {
-          final dist = Geolocator.distanceBetween(
-            (from['lat'] as num).toDouble(),
-            (from['lon'] as num).toDouble(),
-            (to['lat'] as num).toDouble(),
-            (to['lon'] as num).toDouble(),
-          );
+          final dist = _walkingLegDistanceMeters(last);
           if (dist > 1000) {
             final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
             final start =
@@ -2367,6 +2356,7 @@ class _MapViewState extends State<MapView> {
               'startTime': start.toIso8601String(),
               'endTime': end.toIso8601String(),
               'routeShortName': 'E-hailing from nearest stop',
+              'distanceMeters': dist,
               'paymentMethod': 'Pay in the e-hailing app',
               'isLastMile': true,
             };
@@ -2428,6 +2418,58 @@ class _MapViewState extends State<MapView> {
     };
   }
 
+  double _walkingLegDistanceMeters(Map<String, dynamic> leg) {
+    final reportedDistance =
+        (leg['distanceMeters'] as num?)?.toDouble() ??
+        (leg['distance'] as num?)?.toDouble();
+    if (reportedDistance != null && reportedDistance > 0) {
+      return reportedDistance;
+    }
+
+    final geometry = leg['legGeometry'] ?? leg['geometry'];
+    if (geometry is Map && geometry['coordinates'] is List) {
+      final coordinates = (geometry['coordinates'] as List)
+          .whereType<List>()
+          .where((point) => point.length >= 2)
+          .toList();
+      var distance = 0.0;
+      for (var i = 1; i < coordinates.length; i++) {
+        final previous = coordinates[i - 1];
+        final current = coordinates[i];
+        if (previous[0] is! num ||
+            previous[1] is! num ||
+            current[0] is! num ||
+            current[1] is! num) {
+          continue;
+        }
+        distance += Geolocator.distanceBetween(
+          (previous[1] as num).toDouble(),
+          (previous[0] as num).toDouble(),
+          (current[1] as num).toDouble(),
+          (current[0] as num).toDouble(),
+        );
+      }
+      if (distance > 0) return distance;
+    }
+
+    final from = leg['from'];
+    final to = leg['to'];
+    if (from is Map &&
+        to is Map &&
+        from['lat'] is num &&
+        from['lon'] is num &&
+        to['lat'] is num &&
+        to['lon'] is num) {
+      return Geolocator.distanceBetween(
+        (from['lat'] as num).toDouble(),
+        (from['lon'] as num).toDouble(),
+        (to['lat'] as num).toDouble(),
+        (to['lon'] as num).toDouble(),
+      );
+    }
+    return 0;
+  }
+
   String _itinerarySignature(Map<String, dynamic> itinerary) {
     final rawLegs = itinerary['legs'];
     if (rawLegs is! List) return '';
@@ -2474,11 +2516,8 @@ class _MapViewState extends State<MapView> {
         continue;
       }
 
-      final distanceMeters = Geolocator.distanceBetween(
-        fromLat,
-        fromLon,
-        toLat,
-        toLon,
+      final distanceMeters = _walkingLegDistanceMeters(
+        Map<String, dynamic>.from(first),
       );
       if (distanceMeters <= 1000) continue;
       final hailSeconds = math.max(300, (distanceMeters / 9.7).round() + 180);
@@ -2503,6 +2542,7 @@ class _MapViewState extends State<MapView> {
         'startTime': walkStart.toIso8601String(),
         'endTime': hailEnd.toIso8601String(),
         'routeShortName': 'E-hailing to nearest stop',
+        'distanceMeters': distanceMeters,
         'paymentMethod': 'Pay in the e-hailing app',
         'from': from,
         'to': to,
@@ -2568,11 +2608,8 @@ class _MapViewState extends State<MapView> {
           toLon == null) {
         continue;
       }
-      final distanceMeters = Geolocator.distanceBetween(
-        fromLat,
-        fromLon,
-        toLat,
-        toLon,
+      final distanceMeters = _walkingLegDistanceMeters(
+        Map<String, dynamic>.from(last),
       );
       if (distanceMeters <= 1000) continue;
       final start = DateTime.tryParse(last['startTime']?.toString() ?? '');
@@ -2588,6 +2625,7 @@ class _MapViewState extends State<MapView> {
         'startTime': start.toIso8601String(),
         'endTime': end.toIso8601String(),
         'routeShortName': 'E-hailing from nearest stop',
+        'distanceMeters': distanceMeters,
         'paymentMethod': 'Pay in the e-hailing app',
         'isLastMile': true,
         'from': from,
@@ -4021,6 +4059,7 @@ class _MapViewState extends State<MapView> {
             }
           },
           fetchDepartures: () => _fetchNextDepartures(stopId),
+          fetchCrowd: () => _getStationCrowd(stopId),
           fetchCongestion: () => stop == null
               ? Future<TrafficCongestion?>.value(null)
               : _fetchTrafficCongestion(stopId, stop.lat, stop.lon),
@@ -4745,9 +4784,9 @@ class _MapViewState extends State<MapView> {
           future: crowdFuture,
           builder: (context, snapshot) {
             final crowd = snapshot.data;
-            final info =
-                crowd?.label ??
-                (stop.routes.isNotEmpty ? stop.routes : 'Low crowd level');
+            final info = crowd == null
+                ? (stop.routes.isNotEmpty ? stop.routes : 'Low crowd level')
+                : crowd.summaryLabel;
             return Text(
               '${stop.name} • $info',
               maxLines: 1,
@@ -5083,6 +5122,11 @@ class _MapViewState extends State<MapView> {
                   _isSatelliteMode
                       ? Icons.map_outlined
                       : Icons.satellite_alt_outlined,
+                  color:
+                      _isSatelliteMode &&
+                          Theme.of(context).brightness == Brightness.light
+                      ? Colors.white
+                      : null,
                 ),
                 onPressed: _toggleSatellite,
               ),
@@ -5102,6 +5146,7 @@ class _MapViewState extends State<MapView> {
                       isDark
                           ? Icons.light_mode_outlined
                           : Icons.dark_mode_outlined,
+                      color: _isSatelliteMode && !isDark ? Colors.white : null,
                     ),
                     onPressed: _toggleTheme,
                   );

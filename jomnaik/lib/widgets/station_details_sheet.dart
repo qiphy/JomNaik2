@@ -12,6 +12,7 @@ class StationDetailsSheet extends StatefulWidget {
     this.stop,
     required this.onGetDirections,
     required this.fetchDepartures,
+    required this.fetchCrowd,
     required this.fetchCongestion,
     required this.fetchIncidents,
   });
@@ -23,6 +24,7 @@ class StationDetailsSheet extends StatefulWidget {
   final TransitStop? stop;
   final VoidCallback onGetDirections;
   final Future<List<StopDeparture>> Function() fetchDepartures;
+  final Future<StationCrowd?> Function() fetchCrowd;
   final Future<TrafficCongestion?> Function() fetchCongestion;
   final Future<List<StationIncident>> Function() fetchIncidents;
 
@@ -32,6 +34,7 @@ class StationDetailsSheet extends StatefulWidget {
 
 class _StationDetailsSheetState extends State<StationDetailsSheet> {
   late Future<List<StopDeparture>> _departureFuture;
+  late Future<StationCrowd?> _crowdFuture;
   late Future<TrafficCongestion?> _congestionFuture;
   late Future<List<StationIncident>> _incidentsFuture;
   Timer? _refreshTimer;
@@ -47,7 +50,12 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
       if (mounted) {
         setState(() {
           _departureFuture = widget.fetchDepartures();
-          _congestionFuture = widget.fetchCongestion();
+          if (widget.transitType == 'rail') {
+            _crowdFuture = widget.fetchCrowd();
+          }
+          if (widget.transitType == 'bus') {
+            _congestionFuture = widget.fetchCongestion();
+          }
         });
       }
     });
@@ -55,7 +63,12 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
 
   void _loadData() {
     _departureFuture = widget.fetchDepartures();
-    _congestionFuture = widget.fetchCongestion();
+    _crowdFuture = widget.transitType == 'rail'
+        ? widget.fetchCrowd()
+        : Future.value(null);
+    _congestionFuture = widget.transitType == 'bus'
+        ? widget.fetchCongestion()
+        : Future.value(null);
     _incidentsFuture = widget.fetchIncidents();
   }
 
@@ -87,6 +100,36 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
           Expanded(
             child: Text(
               congestion.label,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCrowdIndicator(StationCrowd crowd) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final color = switch (crowd.level) {
+      'high' => Colors.red,
+      'medium' => Colors.orange,
+      _ => Colors.green,
+    };
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: isDark ? color.withValues(alpha: 0.18) : color.shade50,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.groups_outlined, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Crowd level: ${crowd.summaryLabel}',
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
@@ -217,15 +260,33 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                       );
                     },
                   ),
-                  FutureBuilder<TrafficCongestion?>(
-                    future: _congestionFuture,
-                    builder: (context, snapshot) {
-                      final congestion = snapshot.data;
-                      return congestion == null
-                          ? const SizedBox.shrink()
-                          : _buildCongestionIndicator(congestion);
-                    },
-                  ),
+                  if (widget.transitType == 'rail')
+                    FutureBuilder<StationCrowd?>(
+                      future: _crowdFuture,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done &&
+                            !snapshot.hasError) {
+                          return const Padding(
+                            padding: EdgeInsets.only(bottom: 16),
+                            child: LinearProgressIndicator(),
+                          );
+                        }
+                        final crowd =
+                            snapshot.data ??
+                            const StationCrowd(level: 'low', available: false);
+                        return _buildCrowdIndicator(crowd);
+                      },
+                    ),
+                  if (widget.transitType == 'bus')
+                    FutureBuilder<TrafficCongestion?>(
+                      future: _congestionFuture,
+                      builder: (context, snapshot) {
+                        final congestion = snapshot.data;
+                        return congestion == null
+                            ? const SizedBox.shrink()
+                            : _buildCongestionIndicator(congestion);
+                      },
+                    ),
                   Text(
                     'Next departures',
                     style: Theme.of(context).textTheme.titleMedium,

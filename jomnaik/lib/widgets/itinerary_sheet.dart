@@ -111,7 +111,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
               behavior: HitTestBehavior.translucent,
               onPointerDown: (_) => widget.onCardInteractionChanged?.call(true),
               onPointerUp: (_) => widget.onCardInteractionChanged?.call(false),
-              onPointerCancel: (_) => widget.onCardInteractionChanged?.call(false),
+              onPointerCancel: (_) =>
+                  widget.onCardInteractionChanged?.call(false),
               onPointerSignal: (event) {
                 if (event is PointerScrollEvent) {
                   widget.onCardInteractionChanged?.call(true);
@@ -120,7 +121,9 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
               child: Container(
                 decoration: BoxDecoration(
                   color: colorScheme.surface,
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(22),
+                  ),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withValues(alpha: 0.12),
@@ -147,7 +150,9 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               onTap: _toggleExpand,
                               child: Container(
                                 width: double.infinity,
-                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
                                 alignment: Alignment.center,
                                 child: Container(
                                   width: 48,
@@ -165,10 +170,11 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                                 Expanded(
                                   child: Text(
                                     'Total Travel Time: ${formatDuration(widget.itinerary.duration)}',
-                                    style: theme.textTheme.titleMedium?.copyWith(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                    ),
+                                    style: theme.textTheme.titleMedium
+                                        ?.copyWith(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold,
+                                        ),
                                   ),
                                 ),
                                 IconButton(
@@ -195,7 +201,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                                 width: double.infinity,
                                 padding: const EdgeInsets.all(10),
                                 decoration: BoxDecoration(
-                                  color: colorScheme.primaryContainer.withValues(alpha: 0.5),
+                                  color: colorScheme.primaryContainer
+                                      .withValues(alpha: 0.5),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: Row(
@@ -255,8 +262,9 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                           vertical: 4,
                         ),
                         decoration: BoxDecoration(
-                          color: colorScheme.surfaceContainerHighest
-                              .withValues(alpha: 0.5),
+                          color: colorScheme.surfaceContainerHighest.withValues(
+                            alpha: 0.5,
+                          ),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
                             color: Colors.orange.withValues(alpha: 0.3),
@@ -355,7 +363,7 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           Text(
-                            '→ ${leg.headsign ?? 'Direction'}',
+                            leg.terminalDirection,
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           if (leg.incidentReports.isNotEmpty)
@@ -369,9 +377,15 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                         spacing: 8,
                         runSpacing: 4,
                         children: [
-                          Text('Board at ${leg.fromPlace?.name ?? 'the boarding stop'}'),
-                          Text('• Alight at ${leg.toPlace?.name ?? 'your destination'}'),
-                          Text('Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}'),
+                          Text(
+                            'Board at ${leg.fromPlace?.name ?? 'the boarding stop'}',
+                          ),
+                          Text(
+                            '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
+                          ),
+                          Text(
+                            'Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}',
+                          ),
                           if (leg.paymentMethod != null)
                             Text('• Payment: ${leg.paymentMethod}'),
                           if (leg.liveBusEstimate != null)
@@ -431,10 +445,7 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                         }),
                         ListTile(
                           dense: true,
-                          leading: const Icon(
-                            Icons.flag,
-                            color: Colors.red,
-                          ),
+                          leading: const Icon(Icons.flag, color: Colors.red),
                           title: Text(
                             'Alight at ${leg.toPlace?.name ?? 'your destination'}',
                           ),

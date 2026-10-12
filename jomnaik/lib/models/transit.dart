@@ -64,12 +64,12 @@ class TransitStop {
   }
 
   PlaceSearchResult asPlaceSearchResult() => PlaceSearchResult(
-        name: name,
-        address: 'Selected transit stop',
-        lat: lat,
-        lon: lon,
-        stopId: id,
-      );
+    name: name,
+    address: 'Selected transit stop',
+    lat: lat,
+    lon: lon,
+    stopId: id,
+  );
 
   final String id;
   final String name;
@@ -285,14 +285,19 @@ class StationCrowd {
     this.stationId = '',
     this.observedUsers = 0,
     this.capacity = 0,
+    this.available = true,
   });
 
   factory StationCrowd.fromJson(Map<String, dynamic> json) {
     return StationCrowd(
       level: json['level']?.toString() ?? 'unavailable',
-      stationId: json['station_id']?.toString() ?? '',
-      observedUsers: (json['observed_users'] as num?)?.toInt() ?? 0,
+      stationId: (json['stationId'] ?? json['station_id'])?.toString() ?? '',
+      observedUsers:
+          ((json['observedUsers'] ?? json['observed_users']) as num?)
+              ?.toInt() ??
+          0,
       capacity: (json['capacity'] as num?)?.toInt() ?? 0,
+      available: json['available'] != false,
     );
   }
 
@@ -300,6 +305,7 @@ class StationCrowd {
   final String stationId;
   final int observedUsers;
   final int capacity;
+  final bool available;
 
   String get label => switch (level) {
     'high' => 'High crowd level',
@@ -307,6 +313,13 @@ class StationCrowd {
     'low' => 'Low crowd level',
     _ => 'Low crowd level',
   };
+
+  String get peopleLabel {
+    if (!available) return '';
+    return '$observedUsers ${observedUsers == 1 ? 'person' : 'people'} reported';
+  }
+
+  String get summaryLabel => available ? '$label • $peopleLabel' : label;
 }
 
 class TimedCache<T> {

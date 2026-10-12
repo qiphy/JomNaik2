@@ -18,12 +18,12 @@ class Itinerary {
       duration: json['duration'] is num ? json['duration'] as num : 0,
       legs: rawLegs is List
           ? rawLegs
-              .whereType<Map>()
-              .map(
-                (leg) =>
-                    ItineraryLeg.fromJson(Map<String, dynamic>.from(leg)),
-              )
-              .toList()
+                .whereType<Map>()
+                .map(
+                  (leg) =>
+                      ItineraryLeg.fromJson(Map<String, dynamic>.from(leg)),
+                )
+                .toList()
           : const [],
       fallbackMessage:
           json['fallbackMessage']?.toString() ??
@@ -97,8 +97,8 @@ class ItineraryLeg {
       paymentMethod: json['paymentMethod']?.toString(),
       liveBusEstimate: LiveBusEstimate.fromJsonOrNull(json['liveBusEstimate']),
       distanceMeters: (json['distanceMeters'] as num?)?.toDouble(),
-      distanceToDestinationMeters:
-          (json['distanceToDestinationMeters'] as num?)?.toDouble(),
+      distanceToDestinationMeters: (json['distanceToDestinationMeters'] as num?)
+          ?.toDouble(),
       intermediateStops: _intermediateStopsFromJson(json['intermediateStops']),
       incidentReports: _legIncidentsFromJson(json['incidentReports']),
     );
@@ -120,6 +120,35 @@ class ItineraryLeg {
   final double? distanceToDestinationMeters;
   final List<IntermediateStop> intermediateStops;
   final List<LegIncident> incidentReports;
+
+  String get terminalDirection {
+    final sign = headsign?.trim().isNotEmpty == true
+        ? headsign!.trim()
+        : toPlace?.name.trim() ?? '';
+    if (sign.isEmpty) return 'Direction unavailable';
+
+    final toMatches = RegExp(
+      r'\bto\s+',
+      caseSensitive: false,
+    ).allMatches(sign).toList();
+    if (toMatches.isNotEmpty) {
+      final match = toMatches.last;
+      final terminal = sign.substring(match.end).trim();
+      if (terminal.isNotEmpty) return 'to $terminal';
+    }
+
+    for (final separator in ['→', '->']) {
+      final separatorIndex = sign.lastIndexOf(separator);
+      if (separatorIndex >= 0) {
+        final terminal = sign
+            .substring(separatorIndex + separator.length)
+            .trim();
+        if (terminal.isNotEmpty) return 'to $terminal';
+      }
+    }
+
+    return 'to $sign';
+  }
 
   static String _legTime(dynamic primary, dynamic fallback) {
     final value = primary ?? fallback;
@@ -328,8 +357,9 @@ bool isItineraryMapAvailableAtDeparture(
     }
   }
 
-  final initialPlatformWait =
-      firstTransitStart.difference(userArrivalAtTransitStop);
+  final initialPlatformWait = firstTransitStart.difference(
+    userArrivalAtTransitStop,
+  );
   if (initialPlatformWait.inSeconds < -60 ||
       initialPlatformWait > maxPlatformWait) {
     return false;
@@ -362,9 +392,9 @@ extension ItineraryAvailabilityExtension on Itinerary {
     Duration maxPlatformWait = const Duration(minutes: 45),
     Duration maxTransferWait = const Duration(minutes: 60),
   }) {
-    final transitLegs = legs.where(
-      (l) => l.mode != 'WALK' && l.mode != 'HAIL',
-    ).toList();
+    final transitLegs = legs
+        .where((l) => l.mode != 'WALK' && l.mode != 'HAIL')
+        .toList();
 
     if (transitLegs.isEmpty) return true;
 
@@ -390,8 +420,9 @@ extension ItineraryAvailabilityExtension on Itinerary {
           requestedDeparture;
     }
 
-    final initialPlatformWait =
-        firstTransitStart.difference(userArrivalAtTransitStop);
+    final initialPlatformWait = firstTransitStart.difference(
+      userArrivalAtTransitStop,
+    );
     if (initialPlatformWait.inSeconds < -60 ||
         initialPlatformWait > maxPlatformWait) {
       return false;
