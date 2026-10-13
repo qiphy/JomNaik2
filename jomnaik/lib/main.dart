@@ -1092,6 +1092,14 @@ class _MapViewState extends State<MapView> {
     if (!picker.isCompleted) picker.complete(place);
   }
 
+  Future<void> _handleMapClick(dynamic point, LatLng coordinate) async {
+    if (_mapStartPicker != null) {
+      await _handleMapStartPick(point, coordinate);
+    } else if (kIsWeb) {
+      await _showLongPressedLocation(point, coordinate);
+    }
+  }
+
   Future<PlaceSearchResult?> _askForStartLocation() async {
     final controller = TextEditingController();
     var results = <PlaceSearchResult>[];
@@ -5536,10 +5544,12 @@ class _MapViewState extends State<MapView> {
                           onStyleLoadedCallback: () =>
                               _onMapStyleLoaded(mapStyleVersion),
                           onMapClick: (point, coordinate) =>
-                              _handleMapStartPick(point, coordinate),
+                              _handleMapClick(point, coordinate),
                           featureTapsTriggersMapClick: false,
-                          onMapLongClick: (point, coordinate) =>
-                              _showLongPressedLocation(point, coordinate),
+                          onMapLongClick: kIsWeb
+                              ? null
+                              : (point, coordinate) =>
+                                    _showLongPressedLocation(point, coordinate),
                           onCameraMove: _onCameraMove,
                           onCameraIdle: _onCameraIdle,
                           styleString: _dynamicStyleString!,
