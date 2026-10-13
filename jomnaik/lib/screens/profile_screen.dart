@@ -38,8 +38,8 @@ class ProfilePage extends StatefulWidget {
 
 class _ProfilePageState extends State<ProfilePage> {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
+  final _emailController = TextEditingController(text: 'test@mail.com');
+  final _passwordController = TextEditingController(text: '1234567890');
   bool _isSignUp = false;
   bool _isSubmitting = false;
   bool _obscurePassword = true;

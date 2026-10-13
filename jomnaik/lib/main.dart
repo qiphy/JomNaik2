@@ -21,7 +21,6 @@ import 'models/transit.dart';
 import 'models/search.dart';
 import 'screens/startup_screen.dart';
 import 'screens/profile_screen.dart';
-import 'screens/unsupported_zone_screen.dart';
 import 'widgets/live_guidance_card.dart';
 import 'widgets/station_details_sheet.dart';
 import 'widgets/itinerary_sheet.dart';
@@ -547,8 +546,7 @@ class _MapViewState extends State<MapView> {
       longitude <= _tileEast;
 
   void _showUnsupportedZone() {
-    if (!mounted) return;
-    setState(() => _isOutsideSupportedZone = true);
+    _showMessage('This location is outside the supported map area.');
   }
 
   void _scheduleWeather(CameraPosition position) {
@@ -935,9 +933,11 @@ class _MapViewState extends State<MapView> {
       return;
     }
     final candidateFromStopId = origin == null ? selectedStart!.stopId : null;
-    final effectiveFromStopId = candidateFromStopId ??
+    final effectiveFromStopId =
+        candidateFromStopId ??
         _nearestTransitStopWithin(originLat, originLon, 200.0)?.id;
-    final effectiveToStopId = destination.stopId ??
+    final effectiveToStopId =
+        destination.stopId ??
         _nearestTransitStopWithin(destination.lat, destination.lon, 200.0)?.id;
 
     final routeData = await _requestRoute(
@@ -2245,9 +2245,9 @@ class _MapViewState extends State<MapView> {
         if (stopId != null && stopId.isNotEmpty) {
           departureRequests.putIfAbsent(
             stopId,
-            () => _fetchNextDepartures(stopId).catchError(
-              (_) => const <StopDeparture>[],
-            ),
+            () => _fetchNextDepartures(
+              stopId,
+            ).catchError((_) => const <StopDeparture>[]),
           );
         }
       }
@@ -2317,10 +2317,7 @@ class _MapViewState extends State<MapView> {
       });
     }
 
-    return {
-      ...routeData,
-      'itineraries': updatedItineraries,
-    };
+    return {...routeData, 'itineraries': updatedItineraries};
   }
 
   Future<Map<String, dynamic>?> _fetchTomTomTrafficEstimate({
@@ -2647,7 +2644,7 @@ class _MapViewState extends State<MapView> {
 
     if (!changed) return itinerary;
 
-   /* final origDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
+    /* final origDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
     final updatedDuration = _durationFromLegs(legs, origDuration);
     final walkingSeconds = legs
         .where((l) => l['mode']?.toString().toUpperCase() == 'WALK')
@@ -2692,7 +2689,7 @@ class _MapViewState extends State<MapView> {
       'optionMessage': optionMessage,
       'legs': legs,
     }; */
-  } 
+  }
 
   double _walkingLegDistanceMeters(Map<String, dynamic> leg) {
     final from = leg['from'];
@@ -5057,6 +5054,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Widget _buildNearestStationCard() {
+    final isOutsideSupportedZone = _isOutsideSupportedZone;
     final stop = _nearestTransitStop;
     final position = _lastKnownPosition;
     final hasLocation = position != null;
@@ -5077,7 +5075,9 @@ class _MapViewState extends State<MapView> {
         : '${(distance / 1000).toStringAsFixed(1)} km away';
 
     final isBus = stop?.transitType == 'bus';
-    final cardTitle = stop == null
+    final cardTitle = isOutsideSupportedZone
+        ? 'Outside supported map area'
+        : stop == null
         ? 'Nearest transit point'
         : isBus
         ? 'Nearest bus stop'
@@ -5095,7 +5095,17 @@ class _MapViewState extends State<MapView> {
     final Widget? trailingWidget;
     final VoidCallback? onTapAction;
 
-    if (!hasLocation) {
+    if (isOutsideSupportedZone) {
+      leadingIcon = Icons.warning_amber_rounded;
+      subtitleWidget = Text(
+        'JomRide currently supports the Klang Valley map area.',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: isCompact ? Theme.of(context).textTheme.bodySmall : null,
+      );
+      trailingWidget = null;
+      onTapAction = null;
+    } else if (!hasLocation) {
       leadingIcon = Icons.location_off_outlined;
       subtitleWidget = Text(
         'Location unavailable • Tap to enable',
@@ -5172,7 +5182,9 @@ class _MapViewState extends State<MapView> {
     }
 
     return Material(
-      color: colorScheme.surfaceContainerLow,
+      color: isOutsideSupportedZone
+          ? colorScheme.tertiaryContainer
+          : colorScheme.surfaceContainerLow,
       child: InkWell(
         onTap: onTapAction,
         child: Padding(
@@ -5181,8 +5193,12 @@ class _MapViewState extends State<MapView> {
             children: [
               CircleAvatar(
                 radius: isCompact ? 18 : 20,
-                backgroundColor: colorScheme.secondaryContainer,
-                foregroundColor: colorScheme.onSecondaryContainer,
+                backgroundColor: isOutsideSupportedZone
+                    ? colorScheme.tertiary
+                    : colorScheme.secondaryContainer,
+                foregroundColor: isOutsideSupportedZone
+                    ? colorScheme.onTertiary
+                    : colorScheme.onSecondaryContainer,
                 child: Icon(leadingIcon, size: isCompact ? 20 : 24),
               ),
               SizedBox(width: isCompact ? 8 : 12),
@@ -5366,9 +5382,6 @@ class _MapViewState extends State<MapView> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isOutsideSupportedZone) {
-      return const Scaffold(body: UnsupportedZoneScreen());
-    }
     final isMapTab = _selectedTab == 0;
     final itineraryIsOpen = _selectedTab == 0 && _currentItinerary != null;
     final mapStyleVersion = _mapStyleVersion;
@@ -5495,221 +5508,230 @@ class _MapViewState extends State<MapView> {
           children: [
             IndexedStack(
               index: _selectedTab,
-          children: [
-            _dynamicStyleString == null
-                ? const Center(child: CircularProgressIndicator())
-                : Stack(
-                    children: [
-                      IgnorePointer(
-                        // A modal station sheet or route choices sheet can
-                        // leave the native/web map view in the gesture arena.
-                        // IgnorePointer blocks that map view until the sheet is gone.
-                        ignoring:
-                            _isStationDetailsOpen || _isRouteChoicesOpen,
-                        child: MapLibreMap(
-                          key: ValueKey('map_style_$_mapStyleVersion'),
-                          initialCameraPosition: const CameraPosition(
-                            target: LatLng(3.1390, 101.6868),
-                            zoom: 12,
-                          ),
-                          // Weather is keyed to the visible map centre.
-                          trackCameraPosition: true,
-                          scrollGesturesEnabled:
-                              !_isScrollingCard &&
-                              !_isCardExpanded &&
-                              !_isStationDetailsOpen &&
-                              !_isRouteChoicesOpen,
-                          zoomGesturesEnabled:
-                              !_isScrollingCard &&
-                              !_isCardExpanded &&
-                              !_isStationDetailsOpen &&
-                              !_isRouteChoicesOpen,
-                          rotateGesturesEnabled:
-                              !_isScrollingCard &&
-                              !_isCardExpanded &&
-                              !_isStationDetailsOpen &&
-                              !_isRouteChoicesOpen,
-                          tiltGesturesEnabled:
-                              !_isScrollingCard &&
-                              !_isCardExpanded &&
-                              !_isStationDetailsOpen &&
-                              !_isRouteChoicesOpen,
-                          doubleClickZoomEnabled:
-                              !_isScrollingCard &&
-                              !_isCardExpanded &&
-                              !_isStationDetailsOpen &&
-                              !_isRouteChoicesOpen,
-                          onMapCreated: (controller) =>
-                              _onMapCreated(controller, mapStyleVersion),
-                          onStyleLoadedCallback: () =>
-                              _onMapStyleLoaded(mapStyleVersion),
-                          onMapClick: (point, coordinate) =>
-                              _handleMapClick(point, coordinate),
-                          featureTapsTriggersMapClick: false,
-                          onMapLongClick: kIsWeb
-                              ? null
-                              : (point, coordinate) =>
-                                    _showLongPressedLocation(point, coordinate),
-                          onCameraMove: _onCameraMove,
-                          onCameraIdle: _onCameraIdle,
-                          styleString: _dynamicStyleString!,
-                          compassEnabled: false,
-                          compassViewPosition: kIsWeb
-                              ? CompassViewPosition.topRight
-                              : CompassViewPosition.bottomRight,
-                          compassViewMargins: kIsWeb
-                              ? null
-                              : const Point(16, 160),
-                        ),
-                      ),
-                      if (_isCardExpanded)
-                        Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () {},
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              color: Colors.black.withValues(alpha: 0.54),
+              children: [
+                _dynamicStyleString == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : Stack(
+                        children: [
+                          IgnorePointer(
+                            // A modal station sheet or route choices sheet can
+                            // leave the native/web map view in the gesture arena.
+                            // IgnorePointer blocks that map view until the sheet is gone.
+                            ignoring:
+                                _isStationDetailsOpen || _isRouteChoicesOpen,
+                            child: MapLibreMap(
+                              key: ValueKey('map_style_$_mapStyleVersion'),
+                              initialCameraPosition: const CameraPosition(
+                                target: LatLng(3.1390, 101.6868),
+                                zoom: 12,
+                              ),
+                              // Weather is keyed to the visible map centre.
+                              trackCameraPosition: true,
+                              scrollGesturesEnabled:
+                                  !_isScrollingCard &&
+                                  !_isCardExpanded &&
+                                  !_isStationDetailsOpen &&
+                                  !_isRouteChoicesOpen,
+                              zoomGesturesEnabled:
+                                  !_isScrollingCard &&
+                                  !_isCardExpanded &&
+                                  !_isStationDetailsOpen &&
+                                  !_isRouteChoicesOpen,
+                              rotateGesturesEnabled:
+                                  !_isScrollingCard &&
+                                  !_isCardExpanded &&
+                                  !_isStationDetailsOpen &&
+                                  !_isRouteChoicesOpen,
+                              tiltGesturesEnabled:
+                                  !_isScrollingCard &&
+                                  !_isCardExpanded &&
+                                  !_isStationDetailsOpen &&
+                                  !_isRouteChoicesOpen,
+                              doubleClickZoomEnabled:
+                                  !_isScrollingCard &&
+                                  !_isCardExpanded &&
+                                  !_isStationDetailsOpen &&
+                                  !_isRouteChoicesOpen,
+                              onMapCreated: (controller) =>
+                                  _onMapCreated(controller, mapStyleVersion),
+                              onStyleLoadedCallback: () =>
+                                  _onMapStyleLoaded(mapStyleVersion),
+                              onMapClick: (point, coordinate) =>
+                                  _handleMapClick(point, coordinate),
+                              featureTapsTriggersMapClick: false,
+                              onMapLongClick: kIsWeb
+                                  ? null
+                                  : (point, coordinate) =>
+                                        _showLongPressedLocation(
+                                          point,
+                                          coordinate,
+                                        ),
+                              onCameraMove: _onCameraMove,
+                              onCameraIdle: _onCameraIdle,
+                              styleString: _dynamicStyleString!,
+                              compassEnabled: false,
+                              compassViewPosition: kIsWeb
+                                  ? CompassViewPosition.topRight
+                                  : CompassViewPosition.bottomRight,
+                              compassViewMargins: kIsWeb
+                                  ? null
+                                  : const Point(16, 160),
                             ),
                           ),
-                        ),
-                      if (_currentItinerary == null)
-                        Positioned(
-                          top: 66,
-                          left: 16,
-                          right: 16,
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: (notification) {
-                              if (notification is ScrollStartNotification ||
-                                  notification is UserScrollNotification) {
-                                _setScrollingCard(true);
-                              } else if (notification
-                                  is ScrollEndNotification) {
-                                _setScrollingCard(false);
-                              }
-                              return false;
-                            },
-                            child: Listener(
-                              behavior: HitTestBehavior.opaque,
-                              onPointerDown: (_) {
-                                _beginOverlayInteraction();
-                                _setScrollingCard(true);
-                              },
-                              onPointerUp: (_) {
-                                _endOverlayInteraction();
-                                _setScrollingCard(false);
-                              },
-                              onPointerCancel: (_) {
-                                _endOverlayInteraction();
-                                _setScrollingCard(false);
-                              },
-                              onPointerSignal: (event) {
-                                if (event is PointerScrollEvent) {
-                                  _setScrollingCard(true);
-                                }
-                              },
+                          if (_isCardExpanded)
+                            Positioned.fill(
                               child: GestureDetector(
                                 behavior: HitTestBehavior.opaque,
-                                // Claim taps on the floating search/station panel
-                                // so they cannot fall through to MapLibre beneath it.
                                 onTap: () {},
-                                child: _buildMapTopPanel(),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  color: Colors.black.withValues(alpha: 0.54),
+                                ),
                               ),
                             ),
-                          ),
-                        ),
-                      if (_currentItinerary == null && _canReportIncident)
-                        Positioned(
-                          left: 16,
-                          bottom: 16,
-                          child: SafeArea(
-                            child: FloatingActionButton.extended(
-                              heroTag: 'report-incident',
-                              onPressed: _openIncidentReport,
-                              icon: const Icon(Icons.report_problem_outlined),
-                              label: const Text('Report'),
+                          if (_currentItinerary == null)
+                            Positioned(
+                              top: 66,
+                              left: 16,
+                              right: 16,
+                              child: NotificationListener<ScrollNotification>(
+                                onNotification: (notification) {
+                                  if (notification is ScrollStartNotification ||
+                                      notification is UserScrollNotification) {
+                                    _setScrollingCard(true);
+                                  } else if (notification
+                                      is ScrollEndNotification) {
+                                    _setScrollingCard(false);
+                                  }
+                                  return false;
+                                },
+                                child: Listener(
+                                  behavior: HitTestBehavior.opaque,
+                                  onPointerDown: (_) {
+                                    _beginOverlayInteraction();
+                                    _setScrollingCard(true);
+                                  },
+                                  onPointerUp: (_) {
+                                    _endOverlayInteraction();
+                                    _setScrollingCard(false);
+                                  },
+                                  onPointerCancel: (_) {
+                                    _endOverlayInteraction();
+                                    _setScrollingCard(false);
+                                  },
+                                  onPointerSignal: (event) {
+                                    if (event is PointerScrollEvent) {
+                                      _setScrollingCard(true);
+                                    }
+                                  },
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    // Claim taps on the floating search/station panel
+                                    // so they cannot fall through to MapLibre beneath it.
+                                    onTap: () {},
+                                    child: _buildMapTopPanel(),
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                      if (_currentItinerary != null)
-                        ItinerarySheet(
-                          itinerary: _currentItinerary!,
-                          initialExtent: _itineraryInitialExtent,
-                          weatherReminder: _weatherItineraryReminder(
-                            _currentItinerary!,
-                          ),
-                          guidanceCard: _buildJourneyGuidanceCard(),
-                          onDismiss: _dismissItinerary,
-                          onFindApps: _openEhailingStore,
-                          onOpenGrab: (leg) => _openGrab(leg: leg),
-                          onUserInteracted: _markItineraryUserInteracted,
-                          onCardInteractionChanged: _setScrollingCard,
-                          onExpandedChanged: (expanded) {
-                            if (_isCardExpanded != expanded) {
-                              setState(() => _isCardExpanded = expanded);
-                            }
-                          },
-                        ),
-                    ],
+                          if (_currentItinerary == null && _canReportIncident)
+                            Positioned(
+                              left: 16,
+                              bottom: 16,
+                              child: SafeArea(
+                                child: FloatingActionButton.extended(
+                                  heroTag: 'report-incident',
+                                  onPressed: _openIncidentReport,
+                                  icon: const Icon(
+                                    Icons.report_problem_outlined,
+                                  ),
+                                  label: const Text('Report'),
+                                ),
+                              ),
+                            ),
+                          if (_currentItinerary != null)
+                            ItinerarySheet(
+                              itinerary: _currentItinerary!,
+                              initialExtent: _itineraryInitialExtent,
+                              weatherReminder: _weatherItineraryReminder(
+                                _currentItinerary!,
+                              ),
+                              guidanceCard: _buildJourneyGuidanceCard(),
+                              onDismiss: _dismissItinerary,
+                              onFindApps: _openEhailingStore,
+                              onOpenGrab: (leg) => _openGrab(leg: leg),
+                              onUserInteracted: _markItineraryUserInteracted,
+                              onCardInteractionChanged: _setScrollingCard,
+                              onExpandedChanged: (expanded) {
+                                if (_isCardExpanded != expanded) {
+                                  setState(() => _isCardExpanded = expanded);
+                                }
+                              },
+                            ),
+                        ],
+                      ),
+                ColoredBox(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF242424)
+                      : Theme.of(context).scaffoldBackgroundColor,
+                  child: ProfilePage(
+                    isSupabaseConfigured: _isSupabaseConfigured,
+                    onStationLocationTrackingChanged:
+                        _setStationLocationTrackingEnabled,
                   ),
-            ColoredBox(
-              color: Theme.of(context).brightness == Brightness.dark
-                  ? const Color(0xFF242424)
-                  : Theme.of(context).scaffoldBackgroundColor,
-              child: ProfilePage(
-                isSupabaseConfigured: _isSupabaseConfigured,
-                onStationLocationTrackingChanged:
-                    _setStationLocationTrackingEnabled,
-              ),
+                ),
+              ],
             ),
-          ],
-        ),
-        if (_isSearchingRoute)
-          Positioned.fill(
-            child: ColoredBox(
-              color: Colors.black.withValues(alpha: 0.55),
-              child: Center(
-                child: Card(
-                  elevation: 8,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 32,
-                      vertical: 26,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(
-                          width: 44,
-                          height: 44,
-                          child: CircularProgressIndicator(strokeWidth: 3.5),
+            if (_isSearchingRoute)
+              Positioned.fill(
+                child: ColoredBox(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  child: Center(
+                    child: Card(
+                      elevation: 8,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 32,
+                          vertical: 26,
                         ),
-                        const SizedBox(height: 18),
-                        Text(
-                          'Searching routes...',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 3.5,
+                              ),
+                            ),
+                            const SizedBox(height: 18),
+                            Text(
+                              'Searching routes...',
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Finding the best options for your journey',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Finding the best options for your journey',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ),
-      ],
-    ),
+          ],
+        ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedTab,
           onDestinationSelected: _selectTab,
