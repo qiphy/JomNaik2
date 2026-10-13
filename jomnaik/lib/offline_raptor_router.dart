@@ -82,9 +82,10 @@ class OfflineRaptorRouter {
       'step_free' => 0.8,
       _ => 1.25,
     };
-    // Find transit stops within walking distance (<= 1000m) and wider hybrid radius (<= 3000m).
-    // Searching walkable stops separately ensures genuine walking-access public transit
-    // (such as BRT at South Quay) is never pruned by a distant station reached via e-hailing.
+    // Find transit stops within walking distance (<= 1000m) and an unlimited
+    // hybrid radius (e-hailing can reach any stop). Searching walkable stops
+    // separately ensures genuine walking-access public transit (such as BRT at
+    // South Quay) is never pruned by a distant station reached via e-hailing.
     final walkableOrigins = _nearby(
       stops,
       fromLat,
@@ -98,7 +99,7 @@ class OfflineRaptorRouter {
       fromLat,
       fromLon,
       preferred: fromStopId,
-      maxDistanceMeters: 3000,
+      maxDistanceMeters: double.infinity,
       walkingSpeed: walkingSpeed,
       targetLat: toLat,
       targetLon: toLon,
@@ -117,7 +118,7 @@ class OfflineRaptorRouter {
       toLat,
       toLon,
       preferred: toStopId,
-      maxDistanceMeters: 3000,
+      maxDistanceMeters: double.infinity,
       walkingSpeed: walkingSpeed,
     );
 

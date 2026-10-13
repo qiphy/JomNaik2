@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import '../models/itinerary.dart';
 import '../utils/formatters.dart';
 
@@ -241,17 +242,75 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                           : leg.isTransferWalk
                           ? 'Transfer via pedestrian route to'
                           : 'Walk to';
-                      return ListTile(
-                        leading: Icon(
-                          Icons.umbrella_outlined,
-                          color: leg.isSheltered ? Colors.teal : Colors.grey,
+                      final children = <Widget>[
+                        ListTile(
+                          leading: Icon(
+                            Icons.umbrella_outlined,
+                            color: leg.isSheltered ? Colors.teal : Colors.grey,
+                          ),
+                          title: Text(
+                            '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
+                          ),
+                          subtitle: Text(
+                              '$walkwayLabel\n'
+                              '${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}',
+                          ),
                         ),
-                        title: Text(
-                          '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
-                        ),
-                        subtitle: Text(
-                          '$walkwayLabel • ${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}',
-                        ),
+                      ];
+                      
+                      // Calculate walking distance and suggest e-hailing if > 1000m
+                      final from = leg.fromPlace;
+                      final to = leg.toPlace;
+
+                      if (from != null && to != null && 
+                          from.lat != null && from.lon != null && 
+                          to.lat != null && to.lon != null) {
+                        final distanceMeters = Geolocator.distanceBetween(
+                          from.lat!.toDouble(),
+                          from.lon!.toDouble(),
+                          to.lat!.toDouble(),
+                          to.lon!.toDouble(),
+                        );
+                        
+                        if (distanceMeters > 1000) {
+                          children.add(
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 4,
+                              ),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: Colors.orange.withValues(alpha: 0.3),
+                                  ),
+                                ),
+                                child: ListTile(
+                                  leading: const Icon(
+                                    Icons.local_taxi,
+                                    color: Colors.orange,
+                                  ),
+                                  title: const Text(
+                                    'Consider e-hailing',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    'This walk is ${(distanceMeters / 1000).toStringAsFixed(1)} km long. '
+                                    'E-hailing may be faster.',
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        }
+                      }
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: children,
                       );
                     }
 
@@ -294,7 +353,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)} • ${fareLabel(widget.itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(widget.itinerary)} (RM1–RM3/km)',
+                                    '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}\n'
+                                    '${fareLabel(widget.itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(widget.itinerary)} (RM1–RM3/km)',
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
@@ -397,7 +457,7 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                             '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
                           ),
                           Text(
-                            'Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}',
+                              'Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}',
                           ),
                           if (leg.paymentMethod != null)
                             Text('• Payment: ${leg.paymentMethod}'),
@@ -433,7 +493,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               incidentStatusLabel(leg.incidentReports.length),
                             ),
                             subtitle: Text(
-                              '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'} • ${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
+                                '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'}\n'
+                                '${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
                             ),
                           ),
                         if (leg.intermediateStops.isEmpty)

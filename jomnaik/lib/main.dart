@@ -2607,28 +2607,10 @@ class _MapViewState extends State<MapView> {
             to['lat'] is num &&
             to['lon'] is num) {
           final dist = _walkingLegDistanceMeters(first);
-          if (dist > 1000) {
-            final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
-            final start =
-                DateTime.tryParse(first['startTime']?.toString() ?? '') ??
-                DateTime.now();
-            final end = start.add(Duration(seconds: hailSeconds));
-            legs[0] = {
-              ...first,
-              'mode': 'HAIL',
-              'startTime': start.toIso8601String(),
-              'endTime': end.toIso8601String(),
-              'routeShortName': 'E-hailing to nearest stop',
-              'pickupDuration': 180,
-              'distanceMeters': dist,
-              'paymentMethod': 'Pay in the e-hailing app',
-              'isFirstMile': true,
-            };
-            hybridFirstMile = true;
-            changed = true;
-            addedFareMin += (dist / 1000);
-            addedFareMax += (dist / 1000) * 3;
-          }
+          // Note: We no longer convert walking to e-hailing here; instead we
+          // rely on _firstMileEhailingAlternatives and _lastMileEhailingAlternatives
+          // to generate explicit e-hailing alternatives. We keep the walking leg
+          // and let the UI suggest e-hailing for long walks (>1000m).
         }
       }
     }
@@ -2647,35 +2629,17 @@ class _MapViewState extends State<MapView> {
             to['lat'] is num &&
             to['lon'] is num) {
           final dist = _walkingLegDistanceMeters(last);
-          if (dist > 1000) {
-            final hailSeconds = math.max(300, (dist / 9.7).round() + 180);
-            final start =
-                DateTime.tryParse(last['startTime']?.toString() ?? '') ??
-                DateTime.now();
-            final end = start.add(Duration(seconds: hailSeconds));
-            legs[legs.length - 1] = {
-              ...last,
-              'mode': 'HAIL',
-              'startTime': start.toIso8601String(),
-              'endTime': end.toIso8601String(),
-              'routeShortName': 'E-hailing from nearest stop',
-              'pickupDuration': 180,
-              'distanceMeters': dist,
-              'paymentMethod': 'Pay in the e-hailing app',
-              'isLastMile': true,
-            };
-            hybridLastMile = true;
-            changed = true;
-            addedFareMin += (dist / 1000);
-            addedFareMax += (dist / 1000) * 3;
-          }
+          // Note: We no longer convert walking to e-hailing here; instead we
+          // rely on _firstMileEhailingAlternatives and _lastMileEhailingAlternatives
+          // to generate explicit e-hailing alternatives. We keep the walking leg
+          // and let the UI suggest e-hailing for long walks (>1000m).
         }
       }
     }
 
     if (!changed) return itinerary;
 
-    final origDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
+   /* final origDuration = (itinerary['duration'] as num?)?.toInt() ?? 0;
     final updatedDuration = _durationFromLegs(legs, origDuration);
     final walkingSeconds = legs
         .where((l) => l['mode']?.toString().toUpperCase() == 'WALK')
@@ -2719,8 +2683,8 @@ class _MapViewState extends State<MapView> {
       'fareLabel': fareLabel,
       'optionMessage': optionMessage,
       'legs': legs,
-    };
-  }
+    }; */
+  } 
 
   double _walkingLegDistanceMeters(Map<String, dynamic> leg) {
     final from = leg['from'];
@@ -3411,21 +3375,8 @@ class _MapViewState extends State<MapView> {
         toLat,
         toLon,
       );
-      if (isWalking &&
-          ((straightDistance <= 1200 &&
-                  (routedDistance > straightDistance * 2.2 ||
-                      routedDistance > straightDistance + 400)) ||
-              (routedDistance > straightDistance * 3.0))) {
-        print(
-          '[JomRide][route] Suppressed off-road highway detour for pedestrian leg '
-          '(straight=${straightDistance.toStringAsFixed(1)}m, routed=${routedDistance.toStringAsFixed(1)}m). '
-          'Using direct pedestrian connection.',
-        );
-        return [
-          [fromLon, fromLat],
-          [toLon, toLat],
-        ];
-      }
+      // Always show the actual foot path from the OSM pedestrian router,
+      // regardless of detour length.
       final privateConnector = _sunwayPrivatePedestrianConnector(
         fromLat: fromLat,
         fromLon: fromLon,
