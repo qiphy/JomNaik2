@@ -6353,31 +6353,28 @@ class _MapViewState extends State<MapView> {
                                         curve: Curves.easeOut,
                                         top: reportTop,
                                         left: 16,
-                                        child: SafeArea(
-                                          bottom: false,
-                                          child: FloatingActionButton.extended(
-                                            heroTag: 'report-incident',
-                                            onPressed:
-                                                _isIncidentReportFlowActive
-                                                ? null
-                                                : _openIncidentReport,
-                                            icon: _isIncidentReportFlowActive
-                                                ? const SizedBox.square(
-                                                    dimension: 18,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                          strokeWidth: 2,
-                                                        ),
-                                                  )
-                                                : const Icon(
-                                                    Icons
-                                                        .report_problem_outlined,
-                                                  ),
-                                            label: Text(
+                                        child: FloatingActionButton.extended(
+                                          heroTag: 'report-incident',
+                                          onPressed:
                                               _isIncidentReportFlowActive
-                                                  ? 'Sending…'
-                                                  : 'Report',
-                                            ),
+                                              ? null
+                                              : _openIncidentReport,
+                                          icon: _isIncidentReportFlowActive
+                                              ? const SizedBox.square(
+                                                  dimension: 18,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                      ),
+                                                )
+                                              : const Icon(
+                                                  Icons
+                                                      .report_problem_outlined,
+                                                ),
+                                          label: Text(
+                                            _isIncidentReportFlowActive
+                                                ? 'Sending…'
+                                                : 'Report',
                                           ),
                                         ),
                                       ),

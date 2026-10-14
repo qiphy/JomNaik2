@@ -42,7 +42,7 @@ void main() {
     expect(hasBrt, isTrue, reason: 'BRT journey connecting at USJ 7 should be present.');
   });
 
-  test('Off-road location at South Quay connects directly to BRT with pedestrian geometry', () async {
+  test('Off-road South Quay keeps direct BRT access as an alternative', () async {
     // Exact off-road coordinates from user screenshot (inside Sunway GEO / South Quay parcel)
     const fromLat = 3.061938;
     const fromLon = 101.595626;
@@ -62,8 +62,21 @@ void main() {
     final itineraries = (result!['itineraries'] as List).cast<Map<String, dynamic>>();
     expect(itineraries, isNotEmpty);
 
-    final topItinerary = itineraries.first;
-    final legs = (topItinerary['legs'] as List).cast<Map<String, dynamic>>();
+    final brtItinerary = itineraries.firstWhere((itinerary) {
+      final candidateLegs = (itinerary['legs'] as List)
+          .cast<Map<String, dynamic>>();
+      if (candidateLegs.length < 2 ||
+          candidateLegs.first['isDirectPedestrian'] != true) {
+        return false;
+      }
+      final route = candidateLegs[1]['routeShortName']
+          .toString()
+          .toUpperCase();
+      return route.contains('BRT') || route.contains('SUNWAY LINE');
+    }, orElse: () => <String, dynamic>{});
+    expect(brtItinerary, isNotEmpty);
+
+    final legs = (brtItinerary['legs'] as List).cast<Map<String, dynamic>>();
     final firstLeg = legs.first;
     expect(firstLeg['mode'], equals('WALK'));
     expect(firstLeg['isDirectPedestrian'], isTrue);
@@ -80,6 +93,34 @@ void main() {
       secondLeg['routeShortName'].toString().toUpperCase(),
       anyOf(contains('BRT'), contains('SUNWAY LINE')),
     );
+  });
+
+  test('South Quay to SS 18 keeps the walkable USJ 7 rail stop in search', () async {
+    final result = await OfflineRaptorRouter().plan(
+      fromLat: 3.061938,
+      fromLon: 101.595626,
+      toLat: 3.072,
+      toLon: 101.588,
+      departure: DateTime(2026, 10, 12, 14),
+    );
+
+    expect(result, isNotNull);
+    final itineraries = (result!['itineraries'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(itineraries, isNotEmpty);
+
+    final legs = (itineraries.first['legs'] as List)
+        .cast<Map<String, dynamic>>();
+    final firstTransitLeg = legs.firstWhere(
+      (leg) => leg['mode'] != 'WALK' && leg['mode'] != 'HAIL',
+    );
+    expect(
+      firstTransitLeg['routeShortName'],
+      equals('KJL'),
+      reason: 'The best route should walk to USJ 7 and take KJL to SS 18.',
+    );
+    expect((firstTransitLeg['from'] as Map)['name'], equals('USJ 7'));
+    expect((firstTransitLeg['to'] as Map)['name'], equals('SS 18'));
   });
 
   test('Sunway Line dynamically assigns terminus based on passenger direction', () async {

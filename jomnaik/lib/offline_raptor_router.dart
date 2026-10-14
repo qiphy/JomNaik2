@@ -468,6 +468,7 @@ class OfflineRaptorRouter {
       }
     }
     choices.sort((a, b) => a.walkSeconds.compareTo(b.walkSeconds));
+    if (maxDistanceMeters <= 1000) return choices;
     return choices.take(12).toList();
   }
 
