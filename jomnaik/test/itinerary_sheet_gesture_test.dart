@@ -12,6 +12,7 @@ void main() {
   testWidgets('ItinerarySheet gestures: touching card signals active, touching above card passes through', (tester) async {
     bool mapTapped = false;
     bool isScrollingCard = false;
+    double? sheetExtent;
 
     await tester.pumpWidget(
       MaterialApp(
@@ -35,6 +36,9 @@ void main() {
                 onCardInteractionChanged: (val) {
                   isScrollingCard = val;
                 },
+                onExtentChanged: (extent) {
+                  sheetExtent = extent;
+                },
               ),
             ],
           ),
@@ -54,5 +58,9 @@ void main() {
     // 3. Release touch on the card -> should set isScrollingCard to false
     await gesture.up();
     expect(isScrollingCard, isFalse);
+
+    await tester.dragFrom(const Offset(200, 550), const Offset(0, -180));
+    await tester.pumpAndSettle();
+    expect(sheetExtent, greaterThan(0.3));
   });
 }

@@ -52,6 +52,7 @@ enum _StartChoice { currentLocation, search, map }
 enum _MapLayerAction { satellite, toggleTheme }
 
 const double _mapControlSize = 48;
+const double _mapControlsHeight = 265;
 
 bool get _isSupabaseConfigured =>
     _supabaseUrl.isNotEmpty && _supabasePublishableKey.isNotEmpty;
@@ -162,6 +163,7 @@ class _MapViewState extends State<MapView> {
   int _initializedMapGeneration = -1;
   bool _isSatelliteMode = false;
   bool _isCardExpanded = false;
+  double _itineraryExtent = _itineraryInitialExtent;
   bool _isStationDetailsOpen = false;
   bool _isRouteChoicesOpen = false;
   bool _suppressMapTapFromOverlay = false;
@@ -1405,6 +1407,7 @@ class _MapViewState extends State<MapView> {
     // never make a valid itinerary appear to have failed to load.
     setState(() {
       _currentItinerary = Itinerary.fromJson(itinerary);
+      _itineraryExtent = _itineraryInitialExtent;
       _currentRawItinerary = itinerary;
       _itineraryUserInteracted = false;
       _isJourneyGuidanceActive = false;
@@ -1732,6 +1735,7 @@ class _MapViewState extends State<MapView> {
       _currentItinerary = null;
       _currentRawItinerary = null;
       _isCardExpanded = false;
+      _itineraryExtent = _itineraryInitialExtent;
       _isScrollingCard = false;
       _isJourneyGuidanceActive = false;
       _hasBoardedGuidedTransit = false;
@@ -5736,27 +5740,251 @@ class _MapViewState extends State<MapView> {
                               onOpenGrab: (leg) => _openGrab(leg: leg),
                               onUserInteracted: _markItineraryUserInteracted,
                               onCardInteractionChanged: _setScrollingCard,
+                              onExtentChanged: (extent) {
+                                if ((_itineraryExtent - extent).abs() > 0.002) {
+                                  setState(() => _itineraryExtent = extent);
+                                }
+                              },
                               onExpandedChanged: (expanded) {
                                 if (_isCardExpanded != expanded) {
                                   setState(() => _isCardExpanded = expanded);
                                 }
                               },
                             ),
-                          if (_canReportIncident)
-                            Positioned(
-                              left: 16,
-                              bottom: 16,
-                              child: SafeArea(
-                                child: FloatingActionButton.extended(
-                                  heroTag: 'report-incident',
-                                  onPressed: _openIncidentReport,
-                                  icon: const Icon(
-                                    Icons.report_problem_outlined,
-                                  ),
-                                  label: const Text('Report'),
-                                ),
-                              ),
+                          Positioned.fill(
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                final mapHeight = constraints.maxHeight;
+                                final sheetTop =
+                                    mapHeight * (1 - _itineraryExtent);
+                                final controlsTop = _currentItinerary == null
+                                    ? mapHeight - _mapControlsHeight - 16
+                                    : sheetTop - _mapControlsHeight - 12 < 80
+                                    ? 80.0
+                                    : sheetTop - _mapControlsHeight - 12;
+                                final reportTop = _currentItinerary == null
+                                    ? mapHeight - 72
+                                    : sheetTop - 68 < 80
+                                    ? 80.0
+                                    : sheetTop - 68;
+                                return Stack(
+                                  children: [
+                                    AnimatedPositioned(
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      curve: Curves.easeOut,
+                                      top: controlsTop,
+                                      right: 16,
+                                      child: Listener(
+                                        behavior: HitTestBehavior.opaque,
+                                        onPointerDown: (_) =>
+                                            _beginOverlayInteraction(),
+                                        onPointerUp: (_) =>
+                                            _endOverlayInteraction(),
+                                        onPointerCancel: (_) =>
+                                            _endOverlayInteraction(),
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () {},
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.center,
+                                            children: [
+                                              SizedBox.square(
+                                                dimension: _mapControlSize,
+                                                child: Material(
+                                                  color: Theme.of(
+                                                    context,
+                                                  ).colorScheme.surface,
+                                                  elevation: 3,
+                                                  shape: CircleBorder(
+                                                    side: BorderSide(
+                                                      color: Theme.of(context)
+                                                          .colorScheme
+                                                          .outlineVariant,
+                                                    ),
+                                                  ),
+                                                  clipBehavior: Clip.antiAlias,
+                                                  child: PopupMenuButton<_MapLayerAction>(
+                                                    tooltip: 'Map layers',
+                                                    icon: const Icon(
+                                                      Icons.layers_outlined,
+                                                    ),
+                                                    onSelected: (action) {
+                                                      switch (action) {
+                                                        case _MapLayerAction
+                                                            .satellite:
+                                                          _toggleSatellite();
+                                                          break;
+                                                        case _MapLayerAction
+                                                            .toggleTheme:
+                                                          _toggleTheme();
+                                                          break;
+                                                      }
+                                                    },
+                                                    itemBuilder: (context) {
+                                                      final isDark =
+                                                          Theme.of(
+                                                            context,
+                                                          ).brightness ==
+                                                          Brightness.dark;
+                                                      return [
+                                                        PopupMenuItem(
+                                                          value: _MapLayerAction
+                                                              .satellite,
+                                                          child: Row(
+                                                            children: [
+                                                              const Icon(
+                                                                Icons
+                                                                    .satellite_alt_outlined,
+                                                              ),
+                                                              const SizedBox(
+                                                                width: 12,
+                                                              ),
+                                                              const Expanded(
+                                                                child: Text(
+                                                                  'Satellite imagery',
+                                                                ),
+                                                              ),
+                                                              if (_isSatelliteMode)
+                                                                const Icon(
+                                                                  Icons.check,
+                                                                  size: 18,
+                                                                ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                        PopupMenuItem(
+                                                          value: _MapLayerAction
+                                                              .toggleTheme,
+                                                          child: Row(
+                                                            children: [
+                                                              Icon(
+                                                                isDark
+                                                                    ? Icons
+                                                                          .light_mode_outlined
+                                                                    : Icons
+                                                                          .dark_mode_outlined,
+                                                              ),
+                                                              const SizedBox(
+                                                                width: 12,
+                                                              ),
+                                                              Text(
+                                                                isDark
+                                                                    ? 'Light mode'
+                                                                    : 'Dark mode',
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      ];
+                                                    },
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Material(
+                                                color: Theme.of(
+                                                  context,
+                                                ).colorScheme.surface,
+                                                elevation: 3,
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius:
+                                                      BorderRadius.circular(14),
+                                                  side: BorderSide(
+                                                    color: Theme.of(context)
+                                                        .colorScheme
+                                                        .outlineVariant,
+                                                  ),
+                                                ),
+                                                clipBehavior: Clip.antiAlias,
+                                                child: SizedBox(
+                                                  width: _mapControlSize,
+                                                  child: Column(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      IconButton(
+                                                        tooltip: 'Zoom in',
+                                                        onPressed:
+                                                            _mapController ==
+                                                                null
+                                                            ? null
+                                                            : () => _zoomMap(
+                                                                zoomIn: true,
+                                                              ),
+                                                        icon: const Icon(
+                                                          Icons.add,
+                                                        ),
+                                                      ),
+                                                      const Divider(
+                                                        height: 1,
+                                                        indent: 8,
+                                                        endIndent: 8,
+                                                      ),
+                                                      IconButton(
+                                                        tooltip: 'Zoom out',
+                                                        onPressed:
+                                                            _mapController ==
+                                                                null
+                                                            ? null
+                                                            : () => _zoomMap(
+                                                                zoomIn: false,
+                                                              ),
+                                                        icon: const Icon(
+                                                          Icons.remove,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              _buildCircularMapActionButton(
+                                                tooltip: 'Show north',
+                                                icon: Icons.navigation,
+                                                onPressed:
+                                                    _mapController == null
+                                                    ? null
+                                                    : _showNorth,
+                                              ),
+                                              const SizedBox(height: 8),
+                                              _buildCircularMapActionButton(
+                                                tooltip: 'Show my location',
+                                                icon: Icons.my_location,
+                                                onPressed: _showMyLocation,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    if (_canReportIncident)
+                                      AnimatedPositioned(
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        curve: Curves.easeOut,
+                                        top: reportTop,
+                                        left: 16,
+                                        child: SafeArea(
+                                          child: FloatingActionButton.extended(
+                                            heroTag: 'report-incident',
+                                            onPressed: _openIncidentReport,
+                                            icon: const Icon(
+                                              Icons.report_problem_outlined,
+                                            ),
+                                            label: const Text('Report'),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                );
+                              },
                             ),
+                          ),
                         ],
                       ),
                 ColoredBox(
@@ -5837,135 +6065,6 @@ class _MapViewState extends State<MapView> {
             ),
           ],
         ),
-        floatingActionButton: _selectedTab == 0
-            ? Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _beginOverlayInteraction(),
-                onPointerUp: (_) => _endOverlayInteraction(),
-                onPointerCancel: (_) => _endOverlayInteraction(),
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {},
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      SizedBox.square(
-                        dimension: _mapControlSize,
-                        child: Material(
-                          color: Theme.of(context).colorScheme.surface,
-                          elevation: 3,
-                          shape: CircleBorder(
-                            side: BorderSide(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.outlineVariant,
-                            ),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: PopupMenuButton<_MapLayerAction>(
-                            tooltip: 'Map layers',
-                            icon: const Icon(Icons.layers_outlined),
-                            onSelected: (action) {
-                              switch (action) {
-                                case _MapLayerAction.satellite:
-                                  _toggleSatellite();
-                                  break;
-                                case _MapLayerAction.toggleTheme:
-                                  _toggleTheme();
-                                  break;
-                              }
-                            },
-                            itemBuilder: (context) {
-                              final isDark =
-                                  Theme.of(context).brightness ==
-                                  Brightness.dark;
-                              return [
-                                PopupMenuItem(
-                                  value: _MapLayerAction.satellite,
-                                  child: Row(
-                                    children: [
-                                      const Icon(Icons.satellite_alt_outlined),
-                                      const SizedBox(width: 12),
-                                      const Expanded(
-                                        child: Text('Satellite imagery'),
-                                      ),
-                                      if (_isSatelliteMode)
-                                        const Icon(Icons.check, size: 18),
-                                    ],
-                                  ),
-                                ),
-                                PopupMenuItem(
-                                  value: _MapLayerAction.toggleTheme,
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        isDark
-                                            ? Icons.light_mode_outlined
-                                            : Icons.dark_mode_outlined,
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Text(isDark ? 'Light mode' : 'Dark mode'),
-                                    ],
-                                  ),
-                                ),
-                              ];
-                            },
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Material(
-                        color: Theme.of(context).colorScheme.surface,
-                        elevation: 3,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          side: BorderSide(
-                            color: Theme.of(context).colorScheme.outlineVariant,
-                          ),
-                        ),
-                        clipBehavior: Clip.antiAlias,
-                        child: SizedBox(
-                          width: _mapControlSize,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: 'Zoom in',
-                                onPressed: _mapController == null
-                                    ? null
-                                    : () => _zoomMap(zoomIn: true),
-                                icon: const Icon(Icons.add),
-                              ),
-                              const Divider(height: 1, indent: 8, endIndent: 8),
-                              IconButton(
-                                tooltip: 'Zoom out',
-                                onPressed: _mapController == null
-                                    ? null
-                                    : () => _zoomMap(zoomIn: false),
-                                icon: const Icon(Icons.remove),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      _buildCircularMapActionButton(
-                        tooltip: 'Show north',
-                        icon: Icons.navigation,
-                        onPressed: _mapController == null ? null : _showNorth,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildCircularMapActionButton(
-                        tooltip: 'Show my location',
-                        icon: Icons.my_location,
-                        onPressed: _showMyLocation,
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            : null,
       ),
     );
   }

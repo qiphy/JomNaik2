@@ -17,6 +17,7 @@ class ItinerarySheet extends StatefulWidget {
     this.onUserInteracted,
     this.onCardInteractionChanged,
     this.onExpandedChanged,
+    this.onExtentChanged,
   });
 
   final Itinerary itinerary;
@@ -29,6 +30,7 @@ class ItinerarySheet extends StatefulWidget {
   final VoidCallback? onUserInteracted;
   final ValueChanged<bool>? onCardInteractionChanged;
   final ValueChanged<bool>? onExpandedChanged;
+  final ValueChanged<double>? onExtentChanged;
 
   @override
   State<ItinerarySheet> createState() => _ItinerarySheetState();
@@ -89,6 +91,7 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
           onNotification: (notification) {
             final isExpanded = notification.extent >= 0.65;
             widget.onExpandedChanged?.call(isExpanded);
+            widget.onExtentChanged?.call(notification.extent);
             if ((notification.extent - widget.initialExtent).abs() > 0.005) {
               widget.onUserInteracted?.call();
             }
@@ -252,26 +255,29 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                             '$walkPrefix ${leg.toPlace?.name ?? 'the next stop'}',
                           ),
                           subtitle: Text(
-                              '$walkwayLabel\n'
-                              '${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}',
+                            '$walkwayLabel\n'
+                            '${leg.isNearestStationAccess ? 'Street route • ' : ''}${leg.fromPlace != null ? 'From ${leg.fromPlace!.name} • ' : ''}${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}',
                           ),
                         ),
                       ];
-                      
+
                       // Calculate walking distance and suggest e-hailing if > 1000m
                       final from = leg.fromPlace;
                       final to = leg.toPlace;
 
-                      if (from != null && to != null && 
-                          from.lat != null && from.lon != null && 
-                          to.lat != null && to.lon != null) {
+                      if (from != null &&
+                          to != null &&
+                          from.lat != null &&
+                          from.lon != null &&
+                          to.lat != null &&
+                          to.lon != null) {
                         final distanceMeters = Geolocator.distanceBetween(
                           from.lat!.toDouble(),
                           from.lon!.toDouble(),
                           to.lat!.toDouble(),
                           to.lon!.toDouble(),
                         );
-                        
+
                         if (distanceMeters > 1000) {
                           children.add(
                             Padding(
@@ -353,8 +359,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                    '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}\n'
-                                    '${fareLabel(widget.itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(widget.itinerary)} (RM1–RM3/km)',
+                                  '${formatTime(leg.startTime)} - ${formatTime(leg.endTime)}\n'
+                                  '${fareLabel(widget.itinerary).isEmpty ? 'Direct distance estimate' : fareLabel(widget.itinerary)} (RM1–RM3/km)',
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
@@ -457,7 +463,7 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                             '• Alight at ${leg.toPlace?.name ?? 'your destination'}',
                           ),
                           Text(
-                              'Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}',
+                            'Depart ${formatTime(leg.startTime)} • Arrive ${formatTime(leg.endTime)}',
                           ),
                           if (leg.paymentMethod != null)
                             Text('• Payment: ${leg.paymentMethod}'),
@@ -493,8 +499,8 @@ class _ItinerarySheetState extends State<ItinerarySheet> {
                               incidentStatusLabel(leg.incidentReports.length),
                             ),
                             subtitle: Text(
-                                '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'}\n'
-                                '${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
+                              '${leg.incidentReports.length} report${leg.incidentReports.length == 1 ? '' : 's'}\n'
+                              '${leg.incidentReports.map((incident) => incident.stationName).toSet().join(', ')}',
                             ),
                           ),
                         if (leg.intermediateStops.isEmpty)

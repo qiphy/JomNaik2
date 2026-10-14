@@ -52,6 +52,15 @@ def meters(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * radius * math.asin(math.sqrt(value))
 
 
+def _is_ets_route(feed: str, row: dict[str, str]) -> bool:
+    return feed == "ktmb" and (
+        row.get("route_id", "").strip().casefold() == "ets"
+        or row.get("route_short_name", "").strip().casefold() == "ets"
+        or "electric train service"
+        in row.get("route_long_name", "").casefold()
+    )
+
+
 def main() -> None:
     stops: dict[str, list] = {}
     routes: dict[str, list] = {}
@@ -64,12 +73,20 @@ def main() -> None:
         if not path.exists():
             raise SystemExit(f"Missing GTFS archive: {path}")
         with zipfile.ZipFile(path) as archive:
+            route_rows = read_rows(archive, "routes.txt")
+            excluded_route_ids = {
+                row.get("route_id", "")
+                for row in route_rows
+                if _is_ets_route(feed, row)
+            }
             for row in read_rows(archive, "stops.txt"):
                 try:
                     stops[f"{feed}:{row['stop_id']}"] = [row.get("stop_name") or "Transit stop", float(row["stop_lat"]), float(row["stop_lon"])]
                 except (KeyError, ValueError):
                     continue
-            for row in read_rows(archive, "routes.txt"):
+            for row in route_rows:
+                if row.get("route_id", "") in excluded_route_ids:
+                    continue
                 routes[f"{feed}:{row['route_id']}"] = [row.get("route_short_name") or row.get("route_long_name") or "Service", row.get("route_long_name") or "", int(row.get("route_type") or 3)]
             for row in read_rows(archive, "calendar.txt"):
                 start_date = row.get("start_date", "00000000")
@@ -91,6 +108,8 @@ def main() -> None:
                 except (KeyError, ValueError):
                     continue
             for row in read_rows(archive, "trips.txt"):
+                if row.get("route_id", "") in excluded_route_ids:
+                    continue
                 calls = sorted(stop_times.get(row.get("trip_id", ""), []))
                 if len(calls) >= 2:
                     trip_id = f"{feed}:{row['trip_id']}"
@@ -121,6 +140,18 @@ def main() -> None:
                 duration = max(30, round(float(connector.get("distanceMeters") or 0) / 1.2))
                 transfer_map[left][right] = duration
                 transfer_map[right][left] = duration
+
+    active_services = {trip[2] for trip in trips}
+    calendars = {
+        service_id: calendar
+        for service_id, calendar in calendars.items()
+        if service_id in active_services
+    }
+    exceptions = {
+        service_id: dates
+        for service_id, dates in exceptions.items()
+        if service_id in active_services
+    }
 
     document = {
         "version": 1,

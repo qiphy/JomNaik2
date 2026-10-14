@@ -95,10 +95,12 @@ def departures_for_stop(
         for trip in bundle.get("trips", []):
             if not isinstance(trip, list) or len(trip) < 5:
                 continue
+            route_id = trip[1]
+            if str(route_id).casefold() == "ktmb:ets":
+                continue
             service_id = trip[2]
             if not _service_active(bundle, service_id, service_day):
                 continue
-            route_id = trip[1]
             route = routes.get(route_id, [])
             calls = trip[4]
             if not isinstance(calls, list):
