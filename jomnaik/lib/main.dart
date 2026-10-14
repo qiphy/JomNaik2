@@ -3442,6 +3442,11 @@ class _MapViewState extends State<MapView> {
     for (final leg in legs) {
       if (!_isCurrentItineraryRender(renderGeneration)) return;
       final mode = leg['mode'] as String? ?? 'WALK';
+      final routeName = leg['routeShortName']?.toString().toUpperCase() ?? '';
+      final isBrtLeg =
+          routeName.contains('BRT') || routeName.contains('SUNWAY LINE');
+      final canUseUnverifiedGeometry =
+          leg['geometryQuality'] != 'unverified' || isBrtLeg;
       final legCoordinates = <List<double>>[];
       final isStreetLeg = _isStreetLegMode(mode);
       // Transit geometry comes from GTFS. Walking and e-hailing geometry must
@@ -3475,12 +3480,13 @@ class _MapViewState extends State<MapView> {
       }
       final geometry = leg['legGeometry'];
       if (leg['geometryQuality'] == 'unverified' &&
-          mode.toUpperCase() == 'BUS') {
+          mode.toUpperCase() == 'BUS' &&
+          !isBrtLeg) {
         legCoordinates.addAll(await _fetchBusRoadGeometry(leg));
       }
       if (legCoordinates.isEmpty &&
           !isStreetLeg &&
-          leg['geometryQuality'] != 'unverified' &&
+          canUseUnverifiedGeometry &&
           geometry is Map &&
           geometry['points'] is String) {
         final points = geometry['points'] as String;
@@ -3490,7 +3496,7 @@ class _MapViewState extends State<MapView> {
         legCoordinates.addAll(_decodePolyline(points, precision: precision));
       } else if (legCoordinates.isEmpty &&
           !isStreetLeg &&
-          leg['geometryQuality'] != 'unverified' &&
+          canUseUnverifiedGeometry &&
           geometry is Map &&
           geometry['coordinates'] is List) {
         // GTFS shapes are supplied by the backend for generated BRT legs.
