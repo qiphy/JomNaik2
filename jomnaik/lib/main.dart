@@ -5970,6 +5970,7 @@ class _MapViewState extends State<MapView> {
                                         top: reportTop,
                                         left: 16,
                                         child: SafeArea(
+                                          bottom: false,
                                           child: FloatingActionButton.extended(
                                             heroTag: 'report-incident',
                                             onPressed: _openIncidentReport,
