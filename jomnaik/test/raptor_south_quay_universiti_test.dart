@@ -60,6 +60,30 @@ void main() {
         isTrue,
         reason: 'The scheduled route should connect through USJ 7.',
       );
+
+      if (originStopId == 'rapid-kl-bus:1005835') {
+        expect(
+          itineraries.any((itinerary) {
+            final legs = (itinerary['legs'] as List).whereType<Map>().toList();
+            final sunwayIndex = legs.indexWhere(
+              (leg) =>
+                  leg['routeShortName']?.toString().toUpperCase() ==
+                  'SUNWAY LINE',
+            );
+            if (sunwayIndex < 0 || sunwayIndex + 2 >= legs.length) {
+              return false;
+            }
+            final transfer = legs[sunwayIndex + 1];
+            final kjl = legs[sunwayIndex + 2];
+            return transfer['mode'] == 'WALK' &&
+                transfer['isTransferWalk'] == true &&
+                (transfer['to'] as Map?)?['name'] == 'USJ 7' &&
+                kjl['routeShortName']?.toString().toUpperCase() == 'KJL';
+          }),
+          isTrue,
+          reason: 'Sunway Line should offer a direct transfer to KJL at USJ 7.',
+        );
+      }
     }
   });
 }

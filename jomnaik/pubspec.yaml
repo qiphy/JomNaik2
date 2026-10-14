@@ -81,6 +81,16 @@ flutter_launcher_icons:
   ios: true
   image_path: assets/logo.png
   remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: assets/logo.png
+  windows:
+    generate: true
+    image_path: assets/logo.png
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: assets/logo.png
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

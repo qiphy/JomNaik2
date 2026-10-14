@@ -51,6 +51,8 @@ enum _StartChoice { currentLocation, search, map }
 
 enum _MapLayerAction { satellite, toggleTheme }
 
+const double _mapControlSize = 48;
+
 bool get _isSupabaseConfigured =>
     _supabaseUrl.isNotEmpty && _supabasePublishableKey.isNotEmpty;
 
@@ -694,6 +696,19 @@ class _MapViewState extends State<MapView> {
     }
   }
 
+  void _clearPlaceSearch() {
+    _placeSearchDebounce?.cancel();
+    _placeSearchRequestId++;
+    _placeSearchController.clear();
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _selectedPlace = null;
+      _placeSearchResults = const [];
+      _isSearchingPlaces = false;
+    });
+    unawaited(_clearSelectedPlaceMarker());
+  }
+
   Future<List<PlaceSearchResult>> _findPlaces(
     String query, {
     bool allowTransitFallback = true,
@@ -1093,6 +1108,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _handleMapClick(dynamic point, LatLng coordinate) async {
+    if (_suppressMapTapFromOverlay) return;
     if (_mapStartPicker != null) {
       await _handleMapStartPick(point, coordinate);
     } else if (kIsWeb) {
@@ -4278,6 +4294,37 @@ class _MapViewState extends State<MapView> {
     }
   }
 
+  Future<void> _zoomMap({required bool zoomIn}) async {
+    final controller = _mapController;
+    if (controller == null) return;
+    await controller.animateCamera(
+      zoomIn ? CameraUpdate.zoomIn() : CameraUpdate.zoomOut(),
+    );
+  }
+
+  Widget _buildCircularMapActionButton({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback? onPressed,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return SizedBox.square(
+      dimension: _mapControlSize,
+      child: Material(
+        color: colorScheme.primaryContainer,
+        elevation: 3,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: IconButton(
+          tooltip: tooltip,
+          onPressed: onPressed,
+          color: colorScheme.onPrimaryContainer,
+          icon: Icon(icon),
+        ),
+      ),
+    );
+  }
+
   Future<void> _loadAndRenderOfflineRailLines(
     MapLibreMapController controller,
   ) async {
@@ -5321,6 +5368,12 @@ class _MapViewState extends State<MapView> {
                     icon: const Icon(Icons.directions, size: 18),
                     label: const Text('Go'),
                   ),
+                  IconButton(
+                    tooltip: 'Close selected location',
+                    onPressed: _clearPlaceSearch,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.close),
+                  ),
                 ],
               ),
             ),
@@ -5488,6 +5541,19 @@ class _MapViewState extends State<MapView> {
                         prefixIcon: Icon(
                           Icons.search,
                           color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                        suffixIcon: ValueListenableBuilder<TextEditingValue>(
+                          valueListenable: _placeSearchController,
+                          builder: (context, value, _) {
+                            if (value.text.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            return IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: _clearPlaceSearch,
+                              icon: const Icon(Icons.clear),
+                            );
+                          },
                         ),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.symmetric(
@@ -5751,83 +5817,132 @@ class _MapViewState extends State<MapView> {
         // The itinerary sheet owns the lower map while it is open, so it is
         // never obstructed by the map action buttons.
         floatingActionButton: _selectedTab == 0 && _currentItinerary == null
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Material(
-                    color: Theme.of(context).colorScheme.surface,
-                    elevation: 3,
-                    shape: CircleBorder(
-                      side: BorderSide(
-                        color: Theme.of(context).colorScheme.outlineVariant,
+            ? Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _beginOverlayInteraction(),
+                onPointerUp: (_) => _endOverlayInteraction(),
+                onPointerCancel: (_) => _endOverlayInteraction(),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {},
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      SizedBox.square(
+                        dimension: _mapControlSize,
+                        child: Material(
+                          color: Theme.of(context).colorScheme.surface,
+                          elevation: 3,
+                          shape: CircleBorder(
+                            side: BorderSide(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.outlineVariant,
+                            ),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: PopupMenuButton<_MapLayerAction>(
+                            tooltip: 'Map layers',
+                            icon: const Icon(Icons.layers_outlined),
+                            onSelected: (action) {
+                              switch (action) {
+                                case _MapLayerAction.satellite:
+                                  _toggleSatellite();
+                                  break;
+                                case _MapLayerAction.toggleTheme:
+                                  _toggleTheme();
+                                  break;
+                              }
+                            },
+                            itemBuilder: (context) {
+                              final isDark =
+                                  Theme.of(context).brightness ==
+                                  Brightness.dark;
+                              return [
+                                PopupMenuItem(
+                                  value: _MapLayerAction.satellite,
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.satellite_alt_outlined),
+                                      const SizedBox(width: 12),
+                                      const Expanded(
+                                        child: Text('Satellite imagery'),
+                                      ),
+                                      if (_isSatelliteMode)
+                                        const Icon(Icons.check, size: 18),
+                                    ],
+                                  ),
+                                ),
+                                PopupMenuItem(
+                                  value: _MapLayerAction.toggleTheme,
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        isDark
+                                            ? Icons.light_mode_outlined
+                                            : Icons.dark_mode_outlined,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Text(isDark ? 'Light mode' : 'Dark mode'),
+                                    ],
+                                  ),
+                                ),
+                              ];
+                            },
+                          ),
+                        ),
                       ),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: PopupMenuButton<_MapLayerAction>(
-                      tooltip: 'Map layers',
-                      icon: const Icon(Icons.layers_outlined),
-                      onSelected: (action) {
-                        switch (action) {
-                          case _MapLayerAction.satellite:
-                            _toggleSatellite();
-                            break;
-                          case _MapLayerAction.toggleTheme:
-                            _toggleTheme();
-                            break;
-                        }
-                      },
-                      itemBuilder: (context) {
-                        final isDark =
-                            Theme.of(context).brightness == Brightness.dark;
-                        return [
-                          PopupMenuItem(
-                            value: _MapLayerAction.satellite,
-                            child: Row(
-                              children: [
-                                const Icon(Icons.satellite_alt_outlined),
-                                const SizedBox(width: 12),
-                                const Expanded(
-                                  child: Text('Satellite imagery'),
-                                ),
-                                if (_isSatelliteMode)
-                                  const Icon(Icons.check, size: 18),
-                              ],
-                            ),
+                      const SizedBox(height: 8),
+                      Material(
+                        color: Theme.of(context).colorScheme.surface,
+                        elevation: 3,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: BorderSide(
+                            color: Theme.of(context).colorScheme.outlineVariant,
                           ),
-                          PopupMenuItem(
-                            value: _MapLayerAction.toggleTheme,
-                            child: Row(
-                              children: [
-                                Icon(
-                                  isDark
-                                      ? Icons.light_mode_outlined
-                                      : Icons.dark_mode_outlined,
-                                ),
-                                const SizedBox(width: 12),
-                                Text(isDark ? 'Light mode' : 'Dark mode'),
-                              ],
-                            ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: SizedBox(
+                          width: _mapControlSize,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Zoom in',
+                                onPressed: _mapController == null
+                                    ? null
+                                    : () => _zoomMap(zoomIn: true),
+                                icon: const Icon(Icons.add),
+                              ),
+                              const Divider(height: 1, indent: 8, endIndent: 8),
+                              IconButton(
+                                tooltip: 'Zoom out',
+                                onPressed: _mapController == null
+                                    ? null
+                                    : () => _zoomMap(zoomIn: false),
+                                icon: const Icon(Icons.remove),
+                              ),
+                            ],
                           ),
-                        ];
-                      },
-                    ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildCircularMapActionButton(
+                        tooltip: 'Show north',
+                        icon: Icons.navigation,
+                        onPressed: _mapController == null ? null : _showNorth,
+                      ),
+                      const SizedBox(height: 8),
+                      _buildCircularMapActionButton(
+                        tooltip: 'Show my location',
+                        icon: Icons.my_location,
+                        onPressed: _showMyLocation,
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    heroTag: 'show-north',
-                    onPressed: _mapController == null ? null : _showNorth,
-                    tooltip: 'Show north',
-                    child: const Icon(Icons.navigation),
-                  ),
-                  const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    heroTag: 'show-location',
-                    onPressed: _showMyLocation,
-                    tooltip: 'Show my location',
-                    child: const Icon(Icons.my_location),
-                  ),
-                ],
+                ),
               )
             : null,
       ),
