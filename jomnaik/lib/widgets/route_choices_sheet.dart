@@ -90,28 +90,29 @@ class RouteChoicesSheet extends StatelessWidget {
   }
 
   String _routeOptionSummary(Map<String, dynamic> itinerary) {
-    final isHybrid = _routeOptionTitle(itinerary) == 'Hybrid';
-    final services = _itineraryLegs(itinerary)
-        .where((leg) {
-          final mode = leg['mode']?.toString().toUpperCase();
-          return mode != 'WALK' && (isHybrid || mode != 'HAIL');
-        })
+    final steps = _itineraryLegs(itinerary)
+        .where(
+          (leg) =>
+              leg['mode']?.toString().toUpperCase() != 'WALK' ||
+              leg['isTransferWalk'] != true,
+        )
         .map((leg) {
           final mode = leg['mode']?.toString().toUpperCase();
-          if (isHybrid && mode == 'HAIL') return 'E-hailing';
-          return leg['routeShortName']?.toString();
+          if (mode == 'WALK') return 'Walk';
+          if (mode == 'HAIL') return 'E-hailing';
+          return leg['routeShortName']?.toString() ?? mode;
         })
         .whereType<String>()
-        .where((name) => name.isNotEmpty)
+        .where((step) => step.isNotEmpty)
         .toList();
     final sheltered = _itineraryLegs(itinerary).any(
       (leg) =>
           leg['mode']?.toString().toUpperCase() == 'WALK' &&
           leg['isSheltered'] == true,
     );
-    final summary = services.isEmpty
+    final summary = steps.isEmpty
         ? 'Direct journey estimate'
-        : services.join(' → ');
+        : steps.join(' → ');
     final congestion = itinerary['congestion'];
     final stationActivity = congestion is Map
         ? congestion['stationActivity']

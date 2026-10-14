@@ -92,7 +92,7 @@ class _IncidentTypeSelectionSheetState extends State<IncidentTypeSelectionSheet>
             children: [
               Text(
                 widget.isBusStop
-                    ? 'Report bus ${widget.affectedRoute!}'
+                    ? 'Report bus ${widget.affectedRoute ?? 'service'}'
                     : 'Report a rail incident',
                 style: Theme.of(context).textTheme.titleLarge,
               ),

@@ -8,8 +8,12 @@ create table if not exists public.anonymous_incident_reports (
   report_type text not null,
   target_type text not null check (target_type in ('bus', 'station')),
   service_route text,
+  comment text,
   reported_at timestamptz not null default now()
 );
+
+alter table public.anonymous_incident_reports
+add column if not exists comment text;
 
 alter table public.anonymous_incident_reports enable row level security;
 grant insert on public.anonymous_incident_reports to authenticated;

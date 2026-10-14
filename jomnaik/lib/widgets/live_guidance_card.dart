@@ -16,6 +16,7 @@ class LiveGuidanceCard extends StatelessWidget {
     required this.onBoarded,
     required this.onReplan,
     required this.onStop,
+    this.replanLabel = 'Replan from here',
   });
 
   final bool isActive;
@@ -31,6 +32,7 @@ class LiveGuidanceCard extends StatelessWidget {
   final VoidCallback onBoarded;
   final VoidCallback onReplan;
   final VoidCallback onStop;
+  final String replanLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -128,7 +130,7 @@ class LiveGuidanceCard extends StatelessWidget {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.alt_route),
-                      label: const Text('Replan from here'),
+                      label: Text(replanLabel),
                     ),
                   if (isActive)
                     TextButton(

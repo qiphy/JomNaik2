@@ -27,6 +27,8 @@ import 'widgets/itinerary_sheet.dart';
 import 'widgets/route_choices_sheet.dart';
 import 'widgets/incident_report_sheet.dart';
 import 'offline_raptor_router.dart';
+import 'utils/live_route_monitor.dart';
+import 'utils/live_route_alternatives.dart';
 
 const _configuredGtfsBackendBaseUrl = String.fromEnvironment(
   'GTFS_BACKEND_URL',
@@ -180,6 +182,18 @@ class _MapViewState extends State<MapView> {
   int _completedJourneyCount = 0;
   String? _guidanceMessage;
   double? _guidanceDistanceMeters;
+  GuidanceIncidentPoller? _guidanceIncidentPoller;
+  final RouteDeviationDetector _routeDeviationDetector =
+      RouteDeviationDetector();
+  bool _isStartingJourneyGuidance = false;
+  DateTime? _lastGuidanceReplanAt;
+  DateTime? _lastLiveIncidentCheckAt;
+  bool _isCheckingLiveIncidents = false;
+  List<Map<String, dynamic>> _liveIncidentAlternatives = const [];
+  String? _liveIncidentNotice;
+  List<Map>? _recentIncidentReportsCache;
+  DateTime? _recentIncidentReportsCacheAt;
+  Future<List<Map>?>? _incidentReportsRequest;
   StreamSubscription<Position>? _locationSubscription;
   Circle? _userLocationMarker;
   Circle? _userLocationHalo;
@@ -219,6 +233,7 @@ class _MapViewState extends State<MapView> {
   bool _isSearchOpen = true;
   Completer<PlaceSearchResult?>? _mapStartPicker;
   final Set<String> _submittedIncidentKeys = <String>{};
+  bool _isIncidentReportFlowActive = false;
   Map<String, TransitStop> _transitStopsById = const {};
   TransitStop? _nearestTransitStop;
   int _selectedTab = 0;
@@ -344,6 +359,7 @@ class _MapViewState extends State<MapView> {
   void dispose() {
     _mapGeneration++;
     _mapController = null;
+    _stopGuidanceIncidentPolling();
     _locationSubscription?.cancel();
     _authSubscription?.cancel();
     _placeSearchDebounce?.cancel();
@@ -1249,7 +1265,10 @@ class _MapViewState extends State<MapView> {
     return end.difference(start).inSeconds;
   }
 
-  Future<void> _showRouteChoices(Map<String, dynamic>? routeData) async {
+  Future<void> _showRouteChoices(
+    Map<String, dynamic>? routeData, {
+    ValueChanged<Map<String, dynamic>>? onSelectItinerary,
+  }) async {
     if (routeData == null || routeData['itineraries'] is! List) return;
     final itineraries = (routeData['itineraries'] as List<dynamic>)
         .whereType<Map>()
@@ -1378,7 +1397,7 @@ class _MapViewState extends State<MapView> {
         showDragHandle: true,
         builder: (context) => RouteChoicesSheet(
           itineraries: itineraries,
-          onSelectItinerary: _applyItinerary,
+          onSelectItinerary: onSelectItinerary ?? _applyItinerary,
         ),
       );
     } finally {
@@ -1387,6 +1406,9 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _applyItinerary(Map<String, dynamic> itinerary) async {
+    _stopGuidanceIncidentPolling();
+    _liveIncidentAlternatives = const [];
+    _liveIncidentNotice = null;
     FocusScope.of(context).unfocus();
     _placeSearchDebounce?.cancel();
     if (mounted) {
@@ -1421,6 +1443,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _startJourneyGuidance() async {
+    if (_isJourneyGuidanceActive || _isStartingJourneyGuidance) return;
     if (!_isUsingCurrentLocation) {
       _showMessage(
         'Live guidance is only available when starting from your current location.',
@@ -1434,30 +1457,281 @@ class _MapViewState extends State<MapView> {
       );
       return;
     }
-    if (_lastKnownPosition == null) await _startLocationTracking();
-    final position = _lastKnownPosition;
-    if (position == null) {
-      _showMessage('Location is required to start live journey guidance.');
-      return;
+    _isStartingJourneyGuidance = true;
+    try {
+      final position = await _startLocationTracking();
+      if (!mounted || position == null) return;
+      setState(() {
+        _isJourneyGuidanceActive = true;
+        _hasCompletedCurrentJourney = false;
+        _guidedLegIndex = 0;
+        _hasBoardedGuidedTransit = false;
+        _guidanceMessage = 'Finding your first step…';
+      });
+      _routeDeviationDetector.reset();
+      _lastGuidanceReplanAt = null;
+      _lastLiveIncidentCheckAt = null;
+      _liveIncidentAlternatives = const [];
+      _liveIncidentNotice = null;
+      _updateJourneyGuidance(position);
+      _startGuidanceIncidentPolling();
+    } finally {
+      _isStartingJourneyGuidance = false;
     }
-    setState(() {
-      _isJourneyGuidanceActive = true;
-      _hasCompletedCurrentJourney = false;
-      _guidedLegIndex = 0;
-      _hasBoardedGuidedTransit = false;
-      _guidanceMessage = 'Finding your first step…';
-    });
-    _updateJourneyGuidance(position);
   }
 
   void _stopJourneyGuidance() {
+    _stopGuidanceIncidentPolling();
     if (!mounted) return;
     setState(() {
       _isJourneyGuidanceActive = false;
       _hasBoardedGuidedTransit = false;
+      _liveIncidentAlternatives = const [];
+      _liveIncidentNotice = null;
       _guidanceMessage = 'Live guidance stopped.';
       _guidanceDistanceMeters = null;
     });
+  }
+
+  void _startGuidanceIncidentPolling() {
+    if (!_isJourneyGuidanceActive) return;
+    (_guidanceIncidentPoller ??= GuidanceIncidentPoller(
+      onCheck: () async {
+        final position = _lastKnownPosition;
+        if (position != null) await _checkLiveRouteIncidents(position);
+      },
+    )).start();
+  }
+
+  void _stopGuidanceIncidentPolling() {
+    _guidanceIncidentPoller?.stop();
+    _routeDeviationDetector.reset();
+  }
+
+  void _observeGuidancePosition(Position position) {
+    if (!_isJourneyGuidanceActive) return;
+    final positionAge = DateTime.now().difference(position.timestamp);
+    if (position.accuracy > 60 ||
+        positionAge > const Duration(minutes: 2) ||
+        positionAge < const Duration(seconds: -30)) {
+      _routeDeviationDetector.reset();
+      return;
+    }
+
+    final itinerary = _currentItinerary;
+    if (itinerary == null || _guidedLegIndex >= itinerary.legs.length) return;
+    final leg = itinerary.legs[_guidedLegIndex];
+    final deviated = _routeDeviationDetector.observe(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracyMeters: position.accuracy,
+      speedMetersPerSecond: position.speed,
+      timestamp: position.timestamp,
+      isWalking: leg.mode.toUpperCase() == 'WALK',
+      routeCoordinates: _guidedLegRouteCoordinates(_guidedLegIndex),
+    );
+    final now = DateTime.now();
+    final lastReplan = _lastGuidanceReplanAt;
+    if (deviated &&
+        !_isGuidanceReplanning &&
+        (lastReplan == null ||
+            now.difference(lastReplan) >= const Duration(minutes: 2))) {
+      _lastGuidanceReplanAt = now;
+      unawaited(_replanGuidedJourney());
+    }
+    unawaited(_checkLiveRouteIncidents(position));
+  }
+
+  Future<void> _checkLiveRouteIncidents(Position position) async {
+    if (!mounted ||
+        !_isJourneyGuidanceActive ||
+        _isGuidanceReplanning ||
+        _routeRequestInFlight ||
+        _isCheckingLiveIncidents) {
+      return;
+    }
+    final now = DateTime.now();
+    final lastCheck = _lastLiveIncidentCheckAt;
+    if (lastCheck != null && now.difference(lastCheck) < const Duration(minutes: 2)) {
+      return;
+    }
+    _lastLiveIncidentCheckAt = now;
+    _isCheckingLiveIncidents = true;
+    var ownsReplanningState = false;
+    try {
+      final incidents = await _fetchRecentIncidentReports();
+      if (!mounted || !_isJourneyGuidanceActive || incidents == null) return;
+      final current = _currentRawItinerary;
+      final rawLegs = current?['legs'];
+      if (current == null || rawLegs is! List || _guidedLegIndex >= rawLegs.length) {
+        return;
+      }
+
+      final remaining = <String, dynamic>{
+        ...current,
+        'legs': rawLegs.skip(_guidedLegIndex).toList(),
+      };
+      final annotatedData = _annotateIncidentRisk(
+        {'itineraries': [remaining]},
+        incidents,
+      );
+      final annotatedLegs = annotatedData['itineraries'] is List &&
+              (annotatedData['itineraries'] as List).isNotEmpty
+          ? (annotatedData['itineraries'] as List).first['legs'] as List
+          : remaining['legs'] as List;
+      final risk = _incidentRiskForItinerary(remaining, incidents);
+      final delay = _incidentDelaySeconds(remaining, incidents);
+      final baseDuration =
+          (current['baseDuration'] as num?) ?? (current['duration'] as num? ?? 0);
+      final updated = <String, dynamic>{
+        ...current,
+        'legs': [
+          ...rawLegs.take(_guidedLegIndex),
+          ...annotatedLegs,
+        ],
+        'incidentRiskScore': risk.score,
+        'incidentCount': risk.count,
+        'duration': baseDuration.toInt() + delay,
+      };
+      if (delay > 0) {
+        updated['baseDuration'] = baseDuration;
+        updated['incidentDelaySeconds'] = delay;
+      } else {
+        if (current.containsKey('incidentDelaySeconds')) {
+          updated['duration'] = baseDuration;
+          updated.remove('baseDuration');
+          updated.remove('incidentDelaySeconds');
+        }
+      }
+      updated['incidentRiskLabel'] = risk.count > 0
+          ? 'Reported incidents: ${risk.reports.join('; ')}'
+          : 'No recent reported incidents';
+      setState(() {
+        _currentRawItinerary = updated;
+        _currentItinerary = Itinerary.fromJson(updated);
+      });
+
+      if (risk.count == 0) {
+        if (_liveIncidentNotice != null) {
+          setState(() {
+            _liveIncidentAlternatives = const [];
+            _liveIncidentNotice = null;
+          });
+          final latestPosition = _lastKnownPosition;
+          if (latestPosition != null) _updateJourneyGuidance(latestPosition);
+        }
+        return;
+      }
+
+      if (_isGuidanceReplanning || _routeRequestInFlight) return;
+      final destination = _currentItinerary?.legs.last.toPlace;
+      if (destination?.lat == null || destination?.lon == null) return;
+      setState(() {
+        _isGuidanceReplanning = true;
+        _liveIncidentNotice =
+            'Incident reported on the remaining route: ${risk.reports.join('; ')}. Checking alternatives…';
+      });
+      ownsReplanningState = true;
+      final routeData = await _requestRoute(
+        fromLat: position.latitude,
+        fromLon: position.longitude,
+        toLat: destination!.lat!,
+        toLon: destination.lon!,
+        departure: DateTime.now(),
+      );
+      if (!mounted || !_isJourneyGuidanceActive) return;
+      final candidates = routeData?['itineraries'];
+      final lastLeg = rawLegs.last;
+      final arrivalTime = lastLeg is Map
+          ? DateTime.tryParse(lastLeg['endTime']?.toString() ?? '')
+          : null;
+      final remainingSeconds = arrivalTime == null
+          ? baseDuration.toInt()
+          : math.max(
+              0,
+              arrivalTime.difference(DateTime.now()).inSeconds + delay,
+            );
+      final alternatives = candidates is List
+          ? selectSaferRouteAlternatives(
+              currentItinerary: {
+                ...updated,
+                'legs': annotatedLegs,
+                'duration': remainingSeconds,
+              },
+              candidates: candidates.whereType<Map<String, dynamic>>(),
+              currentRemainingSeconds: remainingSeconds,
+            )
+          : const <Map<String, dynamic>>[];
+      setState(() {
+        _liveIncidentAlternatives = alternatives;
+        _liveIncidentNotice = alternatives.isEmpty
+            ? 'Incident reported on the remaining route: ${risk.reports.join('; ')}. No lower-risk option within 10 minutes was found.'
+            : 'Incident reported on the remaining route: ${risk.reports.join('; ')}. ${alternatives.length} lower-risk alternative${alternatives.length == 1 ? '' : 's'} available.';
+      });
+    } catch (error) {
+      debugPrint('Live incident check failed: $error');
+    } finally {
+      _isCheckingLiveIncidents = false;
+      if (mounted && ownsReplanningState) {
+        setState(() => _isGuidanceReplanning = false);
+      }
+    }
+  }
+
+  Future<void> _showLiveRouteAlternatives() async {
+    if (_liveIncidentAlternatives.isEmpty) return;
+    await _showRouteChoices(
+      {'itineraries': _liveIncidentAlternatives},
+      onSelectItinerary: _applyLiveRouteAlternative,
+    );
+  }
+
+  Future<void> _applyLiveRouteAlternative(
+    Map<String, dynamic> itinerary,
+  ) async {
+    _liveIncidentAlternatives = const [];
+    _liveIncidentNotice = null;
+    await _applyItinerary(itinerary);
+    if (mounted) await _startJourneyGuidance();
+  }
+
+  List<List<double>> _guidedLegRouteCoordinates(int legIndex) {
+    final rawLegs = _currentRawItinerary?['legs'];
+    if (rawLegs is! List || legIndex >= rawLegs.length) return const [];
+    final rawLeg = rawLegs[legIndex];
+    if (rawLeg is! Map) return const [];
+    final geometry = rawLeg['legGeometry'] ?? rawLeg['geometry'];
+    final rawCoordinates = geometry is Map ? geometry['coordinates'] : null;
+    if (rawCoordinates is List) {
+      final coordinates = rawCoordinates
+          .whereType<List>()
+          .where(
+            (point) => point.length >= 2 && point[0] is num && point[1] is num,
+          )
+          .map(
+            (point) => [
+              (point[0] as num).toDouble(),
+              (point[1] as num).toDouble(),
+            ],
+          )
+          .toList();
+      if (coordinates.length >= 2) return coordinates;
+    }
+
+    final from = rawLeg['from'];
+    final to = rawLeg['to'];
+    if (from is! Map || to is! Map) return const [];
+    final fromLat = (from['lat'] as num?)?.toDouble();
+    final fromLon = (from['lon'] as num?)?.toDouble();
+    final toLat = (to['lat'] as num?)?.toDouble();
+    final toLon = (to['lon'] as num?)?.toDouble();
+    if (fromLat == null || fromLon == null || toLat == null || toLon == null) {
+      return const [];
+    }
+    return [
+      [fromLon, fromLat],
+      [toLon, toLat],
+    ];
   }
 
   bool _isTransitLeg(ItineraryLeg leg) {
@@ -1540,11 +1814,14 @@ class _MapViewState extends State<MapView> {
     if (itinerary == null) return;
     final nextIndex = _guidedLegIndex + 1;
     if (nextIndex >= itinerary.legs.length) {
+      _stopGuidanceIncidentPolling();
       setState(() {
         _guidedLegIndex = nextIndex;
         _isJourneyGuidanceActive = false;
         _hasCompletedCurrentJourney = true;
         _hasBoardedGuidedTransit = false;
+        _liveIncidentAlternatives = const [];
+        _liveIncidentNotice = null;
         _guidanceDistanceMeters = 0;
         _guidanceMessage = 'You have arrived at your destination.';
       });
@@ -1674,16 +1951,22 @@ class _MapViewState extends State<MapView> {
       hasCurrentStep: hasCurrentLeg,
       currentStep: _guidedLegIndex + 1,
       totalSteps: itinerary.legs.length,
-      message:
-          _guidanceMessage ??
-          'Use your live location to advance each journey step.',
+      message: [
+        _guidanceMessage ?? 'Use your live location to advance each journey step.',
+        ?_liveIncidentNotice,
+      ].join('\n'),
       showBoardedAction: atBoardingStop,
       isReplanning: _isGuidanceReplanning,
+      replanLabel: _liveIncidentAlternatives.isNotEmpty
+          ? 'Review alternatives'
+          : 'Replan from here',
       isCompleted: _hasCompletedCurrentJourney,
       completedTrips: _completedJourneyCount,
       onStart: _startJourneyGuidance,
       onBoarded: _markGuidedTransitBoarded,
-      onReplan: _replanGuidedJourney,
+        onReplan: _liveIncidentAlternatives.isNotEmpty
+          ? _showLiveRouteAlternatives
+          : _replanGuidedJourney,
       onStop: _stopJourneyGuidance,
     );
   }
@@ -1729,6 +2012,7 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _dismissItinerary() async {
+    _stopGuidanceIncidentPolling();
     _itineraryRenderGeneration++;
     _scrollCardDebounce?.cancel();
     setState(() {
@@ -1739,6 +2023,8 @@ class _MapViewState extends State<MapView> {
       _isScrollingCard = false;
       _isJourneyGuidanceActive = false;
       _hasBoardedGuidedTransit = false;
+      _liveIncidentAlternatives = const [];
+      _liveIncidentNotice = null;
       _guidanceMessage = null;
       _guidanceDistanceMeters = null;
     });
@@ -2044,6 +2330,33 @@ class _MapViewState extends State<MapView> {
     // For bus routes, journey times are calculated based on only scheduled
     // timetable times once the user reaches the bus stop. Live bus estimates
     // are not applied to route planning.
+    final incidents = await _fetchRecentIncidentReports();
+    if (incidents == null) return routeData;
+    return _annotateIncidentRisk(routeData, incidents);
+  }
+
+  Future<List<Map>?> _fetchRecentIncidentReports() async {
+    final now = DateTime.now().toUtc();
+    final cacheAt = _recentIncidentReportsCacheAt;
+    if (cacheAt != null &&
+        now.difference(cacheAt) < const Duration(seconds: 45)) {
+      return _recentIncidentReportsCache;
+    }
+    final pendingRequest = _incidentReportsRequest;
+    if (pendingRequest != null) return pendingRequest;
+
+    final request = _loadRecentIncidentReports(now);
+    _incidentReportsRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (identical(_incidentReportsRequest, request)) {
+        _incidentReportsRequest = null;
+      }
+    }
+  }
+
+  Future<List<Map>?> _loadRecentIncidentReports(DateTime now) async {
     try {
       final response = await _httpClient
           .get(
@@ -2051,63 +2364,82 @@ class _MapViewState extends State<MapView> {
             headers: await backendHeaders(),
           )
           .timeout(const Duration(seconds: 8));
-      if (response.statusCode != 200) return routeData;
+      if (response.statusCode != 200) return null;
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map || decoded['incidents'] is! List) return routeData;
-      final now = DateTime.now().toUtc();
-      final incidents = (decoded['incidents'] as List).whereType<Map>().where((
-        incident,
-      ) {
-        final reportedAt = DateTime.tryParse(
-          incident['reported_at']?.toString() ?? '',
-        );
-        if (reportedAt == null) return false;
-        return now.difference(reportedAt.toUtc()) <=
-            const Duration(minutes: 15);
-      }).toList();
-      final itineraries = routeData['itineraries'];
-      if (itineraries is! List) return routeData;
-      return {
-        ...routeData,
-        'itineraries': itineraries.map((raw) {
-          if (raw is! Map) return raw;
-          final itinerary = Map<String, dynamic>.from(raw);
-          final risk = _incidentRiskForItinerary(itinerary, incidents);
-          final incidentDelaySeconds = _incidentDelaySeconds(
-            itinerary,
-            incidents,
-          );
-          final legs = itinerary['legs'];
-          if (legs is List) {
-            itinerary['legs'] = legs.map((rawLeg) {
-              if (rawLeg is! Map) return rawLeg;
-              final leg = Map<String, dynamic>.from(rawLeg);
-              final matches = _incidentsForLeg(leg, incidents);
-              if (matches.isNotEmpty) leg['incidentReports'] = matches;
-              return leg;
-            }).toList();
-          }
-          return {
-            ...itinerary,
-            if (incidentDelaySeconds > 0) ...{
-              'baseDuration': itinerary['duration'],
-              'incidentDelaySeconds': incidentDelaySeconds,
-              'duration':
-                  (itinerary['duration'] as num? ?? 0).toInt() +
-                  incidentDelaySeconds,
-            },
-            'incidentRiskScore': risk.score,
-            if (risk.count > 0)
-              'incidentRiskLabel':
-                  'Reported incidents: ${risk.reports.join('; ')}',
-            if (risk.count == 0)
-              'incidentRiskLabel': 'No recent reported incidents',
-          };
-        }).toList(),
-      };
+      if (decoded is! Map || decoded['incidents'] is! List) return null;
+      final incidents = (decoded['incidents'] as List)
+          .whereType<Map>()
+          .where((incident) {
+            final reportedAt = DateTime.tryParse(
+              incident['reported_at']?.toString() ?? '',
+            );
+            if (reportedAt == null) return false;
+            final age = now.difference(reportedAt.toUtc());
+            return age >= Duration.zero && age <= const Duration(minutes: 15);
+          })
+          .toList();
+      _recentIncidentReportsCache = incidents;
+      _recentIncidentReportsCacheAt = now;
+      return incidents;
     } catch (_) {
-      return routeData;
+      return null;
     }
+  }
+
+  Map<String, dynamic> _annotateIncidentRisk(
+    Map<String, dynamic> routeData,
+    List<Map> incidents,
+  ) {
+    final itineraries = routeData['itineraries'];
+    if (itineraries is! List) return routeData;
+    return {
+      ...routeData,
+      'itineraries': itineraries.map((raw) {
+        if (raw is! Map) return raw;
+        final itinerary = Map<String, dynamic>.from(raw);
+        final risk = _incidentRiskForItinerary(itinerary, incidents);
+        final incidentDelaySeconds = _incidentDelaySeconds(
+          itinerary,
+          incidents,
+        );
+        final updated = <String, dynamic>{
+          ...itinerary,
+          'incidentRiskScore': risk.score,
+          'incidentCount': risk.count,
+          'incidentRiskLabel': risk.count > 0
+              ? 'Reported incidents: ${risk.reports.join('; ')}'
+              : 'No recent reported incidents',
+        };
+        final baseDuration =
+            (itinerary['baseDuration'] as num?) ??
+            (itinerary['duration'] as num? ?? 0);
+        if (incidentDelaySeconds > 0) {
+          updated['baseDuration'] = baseDuration;
+          updated['incidentDelaySeconds'] = incidentDelaySeconds;
+          updated['duration'] = baseDuration.toInt() + incidentDelaySeconds;
+        } else if (itinerary.containsKey('incidentDelaySeconds')) {
+          updated['duration'] = baseDuration;
+          updated.remove('baseDuration');
+          updated.remove('incidentDelaySeconds');
+        }
+
+        final legs = itinerary['legs'];
+        if (legs is List) {
+          updated['legs'] = legs.map((rawLeg) {
+            if (rawLeg is! Map) return rawLeg;
+            final leg = Map<String, dynamic>.from(rawLeg);
+            final matches = _incidentsForLeg(leg, incidents);
+            if (matches.isEmpty) {
+              leg.remove('incidentReports');
+            } else {
+              leg['incidentReports'] = matches;
+            }
+            return leg;
+          }).toList();
+        }
+        return updated;
+      }).toList(),
+    };
   }
 
   Future<Map<String, dynamic>> _applyTomTomTrafficEstimates(
@@ -3822,6 +4154,7 @@ class _MapViewState extends State<MapView> {
     }
     if (isOutsideZone) return;
     _updateJourneyGuidance(position);
+    _observeGuidancePosition(position);
     // Keep the station card's distance in sync with every GPS update, even
     // when the nearest station itself has not changed.
     _updateNearestTransitStop(position);
@@ -4026,6 +4359,16 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _openIncidentReport() async {
+    if (!mounted || _isIncidentReportFlowActive) return;
+    setState(() => _isIncidentReportFlowActive = true);
+    try {
+      await _runIncidentReportFlow();
+    } finally {
+      if (mounted) setState(() => _isIncidentReportFlowActive = false);
+    }
+  }
+
+  Future<void> _runIncidentReportFlow() async {
     if (!_isSupabaseConfigured) {
       _showMessage('Incident reporting is not configured yet.');
       return;
@@ -4115,21 +4458,23 @@ class _MapViewState extends State<MapView> {
       return;
     }
     try {
-      final response = await _httpClient.post(
-        Uri.parse('$_backendBaseUrl/api/incidents'),
-        headers: await backendHeaders(json: true),
-        body: jsonEncode({
-          'station_id': stop.id,
-          'station_name': stop.name,
-          'station_lat': stop.lat,
-          'station_lon': stop.lon,
-          'report_type': report.name,
-          if (comment != null && comment.isNotEmpty) 'comment': comment,
-          'target_type': isBusStop ? 'bus' : 'station',
-          'service_route': affectedRoute,
-          'reported_at': DateTime.now().toUtc().toIso8601String(),
-        }),
-      );
+      final response = await _httpClient
+          .post(
+            Uri.parse('$_backendBaseUrl/api/incidents'),
+            headers: await backendHeaders(json: true),
+            body: jsonEncode({
+              'station_id': stop.id,
+              'station_name': stop.name,
+              'station_lat': stop.lat,
+              'station_lon': stop.lon,
+              'report_type': report.name,
+              if (comment != null && comment.isNotEmpty) 'comment': comment,
+              'target_type': isBusStop ? 'bus' : 'station',
+              'service_route': affectedRoute,
+              'reported_at': DateTime.now().toUtc().toIso8601String(),
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
       if (response.statusCode != 202) {
         throw StateError('Incident was rejected');
       }
@@ -5973,11 +6318,27 @@ class _MapViewState extends State<MapView> {
                                           bottom: false,
                                           child: FloatingActionButton.extended(
                                             heroTag: 'report-incident',
-                                            onPressed: _openIncidentReport,
-                                            icon: const Icon(
-                                              Icons.report_problem_outlined,
+                                            onPressed:
+                                                _isIncidentReportFlowActive
+                                                ? null
+                                                : _openIncidentReport,
+                                            icon: _isIncidentReportFlowActive
+                                                ? const SizedBox.square(
+                                                    dimension: 18,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                        ),
+                                                  )
+                                                : const Icon(
+                                                    Icons
+                                                        .report_problem_outlined,
+                                                  ),
+                                            label: Text(
+                                              _isIncidentReportFlowActive
+                                                  ? 'Sending…'
+                                                  : 'Report',
                                             ),
-                                            label: const Text('Report'),
                                           ),
                                         ),
                                       ),

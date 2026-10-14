@@ -552,13 +552,11 @@ class OfflineRaptorRouter {
     final transfers = Map<String, dynamic>.from(
       data['transfers'] as Map? ?? const {},
     );
-    final stops = Map<String, dynamic>.from(data['stops'] as Map);
     for (var pass = 0; pass < 2; pass++) {
       final updates = <String, _Label>{};
       for (final entry in labels.entries) {
         final links = <dynamic>[
           if (transfers[entry.key] is List) ...(transfers[entry.key] as List),
-          ..._nearbyRailTransfers(entry.key, stops),
         ];
         for (final link in links) {
           if (link is! List || link.length < 2) continue;
@@ -575,39 +573,6 @@ class OfflineRaptorRouter {
       }
       labels.addAll(updates);
     }
-  }
-
-  bool _isRailId(String id) =>
-      id.startsWith('rapid-kl-rail:') || id.startsWith('ktmb:');
-
-  List<List<Object>> _nearbyRailTransfers(
-    String sourceId,
-    Map<String, dynamic> stops,
-  ) {
-    if (!_isRailId(sourceId)) return const [];
-    final source = stops[sourceId];
-    if (source is! List || source.length < 3) return const [];
-    final sourceLat = (source[1] as num?)?.toDouble();
-    final sourceLon = (source[2] as num?)?.toDouble();
-    if (sourceLat == null || sourceLon == null) return const [];
-    final links = <List<Object>>[];
-    for (final entry in stops.entries) {
-      if (entry.key == sourceId || !_isRailId(entry.key)) {
-        continue;
-      }
-      final target = entry.value;
-      if (target is! List || target.length < 3) continue;
-      final distance = _distance(
-        sourceLat,
-        sourceLon,
-        (target[1] as num?)?.toDouble() ?? 0,
-        (target[2] as num?)?.toDouble() ?? 0,
-      );
-      if (distance <= 500) {
-        links.add([entry.key, math.max(60, (distance / 1.25).round())]);
-      }
-    }
-    return links;
   }
 
   bool _serviceActive(
@@ -1383,7 +1348,6 @@ class OfflineRaptorRouter {
     final transfers = Map<String, dynamic>.from(
       data['transfers'] as Map? ?? const {},
     );
-    final stops = Map<String, dynamic>.from(data['stops'] as Map);
     final distances = <String, int>{sourceId: 0};
     final previous = <String, String>{};
     final pending = <String>{sourceId};
@@ -1400,7 +1364,6 @@ class OfflineRaptorRouter {
       if (current == targetId) break;
       final links = <dynamic>[
         if (transfers[current] is List) ...(transfers[current] as List),
-        ..._nearbyRailTransfers(current, stops),
       ];
       for (final link in links) {
         if (link is! List || link.length < 2) continue;

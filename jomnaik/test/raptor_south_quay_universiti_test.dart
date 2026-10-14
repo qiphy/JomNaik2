@@ -11,6 +11,50 @@ void main() {
         (MethodCall methodCall) async => '.',
       );
 
+  test(
+    'Jalan USJ 10/1D to South Quay BRT route uses valid transit legs',
+    () async {
+      final result = await OfflineRaptorRouter().plan(
+        fromLat: 3.0486706,
+        fromLon: 101.5843640,
+        toLat: 3.0617,
+        toLon: 101.5969,
+        toStopId: 'rapid-kl-rail:BRT6',
+        departure: DateTime(2026, 10, 12, 14),
+      );
+
+      expect(result, isNotNull);
+      final itineraries = (result!['itineraries'] as List)
+          .cast<Map<String, dynamic>>();
+      expect(itineraries, isNotEmpty);
+
+      for (final itinerary in itineraries) {
+        final legs = (itinerary['legs'] as List).cast<Map<String, dynamic>>();
+        // ignore: avoid_print
+        print(
+          'USJ 10/1D: ${legs.map((leg) => '${leg['mode']}:${leg['routeShortName']} '
+              '(${(leg['from'] as Map?)?['name']} -> '
+              '${(leg['to'] as Map?)?['name']})').join(' | ')}',
+        );
+      }
+
+      expect(
+        itineraries.any((itinerary) {
+          final legs = (itinerary['legs'] as List).whereType<Map>();
+          return legs.any(
+            (leg) =>
+                leg['mode'] == 'TRAM' &&
+                leg['routeShortName']?.toString().toUpperCase() == 'BRT' &&
+                (leg['to'] as Map?)?['stopId'] == 'rapid-kl-rail:BRT6',
+          );
+        }),
+        isTrue,
+        reason:
+            'The requested destination is the South Quay–USJ1 BRT platform.',
+      );
+    },
+  );
+
   test('South Quay to Universiti can use BRT then KJL', () async {
     for (final originStopId in ['rapid-kl-rail:BRT6', 'rapid-kl-bus:1005835']) {
       final result = await OfflineRaptorRouter().plan(

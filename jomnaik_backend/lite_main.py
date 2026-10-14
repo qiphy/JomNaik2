@@ -86,6 +86,7 @@ class IncidentReport(BaseModel):
     report_type: str = Field(min_length=1, max_length=100)
     target_type: str = Field(pattern="^(bus|station)$")
     service_route: str | None = Field(default=None, max_length=100)
+    comment: str | None = Field(default=None, max_length=2000)
     reported_at: str | None = None
 
 
