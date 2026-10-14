@@ -158,6 +158,7 @@ class _MapViewState extends State<MapView> {
   Map<String, dynamic>? _cachedDarkRawStyle;
   int _mapStyleVersion = 0;
   int _styleRequestGeneration = 0;
+  bool _recenterAfterStyleChange = false;
   int _initializedMapGeneration = -1;
   bool _isSatelliteMode = false;
   bool _isCardExpanded = false;
@@ -399,11 +400,13 @@ class _MapViewState extends State<MapView> {
     final next = themeModeNotifier.value == ThemeMode.dark
         ? ThemeMode.light
         : ThemeMode.dark;
+    _recenterAfterStyleChange = true;
     themeModeNotifier.value = next;
     unawaited(_updateMapStyle());
   }
 
   void _toggleSatellite() {
+    _recenterAfterStyleChange = true;
     setState(() {
       _isSatelliteMode = !_isSatelliteMode;
     });
@@ -3722,8 +3725,28 @@ class _MapViewState extends State<MapView> {
     await _loadAndRenderStationPerimeters(controller);
     if (!mounted || generation != _mapGeneration) return;
     _scheduleWeather(const CameraPosition(target: LatLng(3.1390, 101.6868)));
-    await _startLocationTracking();
+    final currentPosition = await _startLocationTracking();
     if (!mounted || generation != _mapGeneration) return;
+    if (_recenterAfterStyleChange) {
+      final position = currentPosition ?? _lastKnownPosition;
+      if (position != null) {
+        try {
+          await controller.moveCamera(
+            CameraUpdate.newLatLngZoom(
+              LatLng(position.latitude, position.longitude),
+              _lastCameraPosition?.zoom ?? 15,
+            ),
+          );
+          if (mounted && generation == _mapGeneration) {
+            _recenterAfterStyleChange = false;
+          }
+        } catch (error) {
+          debugPrint(
+            '[JomRide][map] Recenter after style change failed: $error',
+          );
+        }
+      }
+    }
     controller.onFeatureTapped.add((
       point,
       coordinates,
@@ -5700,21 +5723,6 @@ class _MapViewState extends State<MapView> {
                                 ),
                               ),
                             ),
-                          if (_currentItinerary == null && _canReportIncident)
-                            Positioned(
-                              left: 16,
-                              bottom: 16,
-                              child: SafeArea(
-                                child: FloatingActionButton.extended(
-                                  heroTag: 'report-incident',
-                                  onPressed: _openIncidentReport,
-                                  icon: const Icon(
-                                    Icons.report_problem_outlined,
-                                  ),
-                                  label: const Text('Report'),
-                                ),
-                              ),
-                            ),
                           if (_currentItinerary != null)
                             ItinerarySheet(
                               itinerary: _currentItinerary!,
@@ -5733,6 +5741,21 @@ class _MapViewState extends State<MapView> {
                                   setState(() => _isCardExpanded = expanded);
                                 }
                               },
+                            ),
+                          if (_canReportIncident)
+                            Positioned(
+                              left: 16,
+                              bottom: 16,
+                              child: SafeArea(
+                                child: FloatingActionButton.extended(
+                                  heroTag: 'report-incident',
+                                  onPressed: _openIncidentReport,
+                                  icon: const Icon(
+                                    Icons.report_problem_outlined,
+                                  ),
+                                  label: const Text('Report'),
+                                ),
+                              ),
                             ),
                         ],
                       ),
@@ -5814,9 +5837,7 @@ class _MapViewState extends State<MapView> {
             ),
           ],
         ),
-        // The itinerary sheet owns the lower map while it is open, so it is
-        // never obstructed by the map action buttons.
-        floatingActionButton: _selectedTab == 0 && _currentItinerary == null
+        floatingActionButton: _selectedTab == 0
             ? Listener(
                 behavior: HitTestBehavior.opaque,
                 onPointerDown: (_) => _beginOverlayInteraction(),
