@@ -13,8 +13,10 @@ server features.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
+import os
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -169,7 +171,23 @@ def main() -> None:
     backend_out = BACKEND / "data/raptor_klang_valley.json"
     backend_out.parent.mkdir(parents=True, exist_ok=True)
     backend_out.write_text(serialized)
-    print(f"Wrote {OUT} and {backend_out}: {len(stops)} stops, {len(trips)} trips, {sum(len(v) for v in transfer_map.values())} transfers")
+    repository = os.getenv("GITHUB_REPOSITORY", "qiphy/JomNaik2")
+    branch = os.getenv("GITHUB_REF_NAME", "main")
+    bundle_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    manifest = {
+        "version": f"{datetime.now(timezone.utc):%Y-%m-%d}-{bundle_hash}",
+        "downloadUrl": (
+            f"https://raw.githubusercontent.com/{repository}/{branch}/"
+            f"{OUT.relative_to(ROOT.parent).as_posix()}"
+        ),
+    }
+    manifest_path = OUT.with_name("raptor_manifest.json")
+    manifest_path.write_text(json.dumps(manifest, separators=(",", ":")))
+    print(
+        f"Wrote {OUT}, {backend_out}, and {manifest_path}: "
+        f"{len(stops)} stops, {len(trips)} trips, "
+        f"{sum(len(v) for v in transfer_map.values())} transfers"
+    )
 
 
 if __name__ == "__main__":

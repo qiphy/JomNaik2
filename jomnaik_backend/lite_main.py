@@ -62,6 +62,10 @@ _traffic_route_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] =
 _offline_manifest_cache: tuple[float, dict[str, str]] | None = None
 _vehicle_cache: tuple[float, dict[str, Any]] | None = None
 _places_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_DEFAULT_OFFLINE_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/qiphy/JomNaik2/main/"
+    "jomnaik/assets/offline/raptor_manifest.json"
+)
 
 
 def _tomtom_api_key() -> str:
@@ -212,7 +216,10 @@ async def offline_manifest() -> dict[str, str]:
     reaches devices even when the lightweight service has not been restarted.
     """
     global _offline_manifest_cache
-    manifest_url = os.getenv("OFFLINE_ROUTING_MANIFEST_URL", "")
+    manifest_url = os.getenv("OFFLINE_ROUTING_MANIFEST_URL", "").strip()
+    uses_default_manifest = not manifest_url or "owner/repository" in manifest_url
+    if uses_default_manifest:
+        manifest_url = _DEFAULT_OFFLINE_MANIFEST_URL
     if manifest_url:
         if _offline_manifest_cache and time.monotonic() - _offline_manifest_cache[0] < 300:
             return _offline_manifest_cache[1]
@@ -232,6 +239,8 @@ async def offline_manifest() -> dict[str, str]:
         except (httpx.HTTPError, ValueError):
             # The static variables below remain a usable, explicit fallback.
             pass
+    if uses_default_manifest:
+        raise HTTPException(503, "The current offline timetable manifest is unavailable")
     url = os.getenv("OFFLINE_ROUTING_BUNDLE_URL", "")
     version = os.getenv("OFFLINE_ROUTING_BUNDLE_VERSION", "")
     if not url or not version:

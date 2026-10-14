@@ -149,6 +149,9 @@ class _MapViewState extends State<MapView> {
   static const _tileNorth = 3.450000;
   static const _tileWest = 101.200000;
   static const _tileEast = 101.950000;
+  final GlobalKey _mapOverlayStackKey = GlobalKey();
+  final GlobalKey _navigationBarKey = GlobalKey();
+  double _measuredMapNavigationOverlap = 0;
   MapLibreMapController? _mapController;
   // MapLibre owns a native platform view. A stale asynchronous map setup can
   // otherwise try to update a controller after the view has been detached
@@ -5805,6 +5808,33 @@ class _MapViewState extends State<MapView> {
     return request;
   }
 
+  double _mapNavigationOverlap() {
+    final mapRenderObject =
+        _mapOverlayStackKey.currentContext?.findRenderObject();
+    final navigationRenderObject =
+        _navigationBarKey.currentContext?.findRenderObject();
+    if (mapRenderObject is! RenderBox ||
+        navigationRenderObject is! RenderBox ||
+        !mapRenderObject.hasSize ||
+        !navigationRenderObject.hasSize) {
+      return 0;
+    }
+    final mapBottom = mapRenderObject
+        .localToGlobal(Offset(0, mapRenderObject.size.height))
+        .dy;
+    final navigationTop = navigationRenderObject.localToGlobal(Offset.zero).dy;
+    return math.max(0.0, mapBottom - navigationTop);
+  }
+
+  void _refreshMapNavigationOverlap() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final overlap = _mapNavigationOverlap();
+      if ((overlap - _measuredMapNavigationOverlap).abs() < 1) return;
+      setState(() => _measuredMapNavigationOverlap = overlap);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final isMapTab = _selectedTab == 0;
@@ -5950,6 +5980,7 @@ class _MapViewState extends State<MapView> {
                 _dynamicStyleString == null
                     ? const Center(child: CircularProgressIndicator())
                     : Stack(
+                      key: _mapOverlayStackKey,
                         children: [
                           IgnorePointer(
                             // A modal station sheet or route choices sheet can
@@ -6099,7 +6130,14 @@ class _MapViewState extends State<MapView> {
                           Positioned.fill(
                             child: LayoutBuilder(
                               builder: (context, constraints) {
+                                _refreshMapNavigationOverlap();
                                 final mapHeight = constraints.maxHeight;
+                                final unobscuredMapHeight =
+                                    mapHeight -
+                                    math.max(
+                                      _measuredMapNavigationOverlap,
+                                      _mapNavigationOverlap(),
+                                    );
                                 final sheetTop =
                                     mapHeight * (1 - _itineraryExtent);
                                 final controlsTop = _currentItinerary == null
@@ -6108,10 +6146,11 @@ class _MapViewState extends State<MapView> {
                                     ? 80.0
                                     : sheetTop - _mapControlsHeight - 12;
                                 final reportTop = _currentItinerary == null
-                                    ? mapHeight - 72
-                                    : sheetTop - 68 < 80
-                                    ? 80.0
-                                    : sheetTop - 68;
+                                  ? math.max(80.0, unobscuredMapHeight - 72)
+                                    : math.min(
+                                        unobscuredMapHeight - 72,
+                                        math.max(80.0, sheetTop - 68),
+                                      );
                                 return Stack(
                                   children: [
                                     AnimatedPositioned(
@@ -6412,6 +6451,7 @@ class _MapViewState extends State<MapView> {
           ],
         ),
         bottomNavigationBar: NavigationBar(
+          key: _navigationBarKey,
           selectedIndex: _selectedTab,
           onDestinationSelected: _selectTab,
           destinations: const [

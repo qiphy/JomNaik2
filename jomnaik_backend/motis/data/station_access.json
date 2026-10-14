@@ -1,0 +1,7 @@
+{
+  "connectors": {
+    "rapid-kl-rail:KJ27|rapid-kl-rail:SA7": {
+      "distanceMeters": 231
+    }
+  }
+}
