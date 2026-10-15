@@ -1,3 +1,24 @@
+int compareRailPriority(
+  Map<String, dynamic> left,
+  Map<String, dynamic> right,
+) {
+  bool usesRail(Map<String, dynamic> itinerary) {
+    final rawLegs = itinerary['legs'];
+    if (rawLegs is! List) return false;
+    return rawLegs.any((leg) {
+      if (leg is! Map) return false;
+      return const {'RAIL', 'SUBWAY', 'TRAM'}.contains(
+        leg['mode']?.toString().toUpperCase(),
+      );
+    });
+  }
+
+  final leftUsesRail = usesRail(left);
+  final rightUsesRail = usesRail(right);
+  if (leftUsesRail == rightUsesRail) return 0;
+  return leftUsesRail ? -1 : 1;
+}
+
 class Itinerary {
   const Itinerary({
     required this.duration,

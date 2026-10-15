@@ -167,9 +167,9 @@ class RoutingService {
     //
     // Do NOT simply make e-hailing the fallback.
     //
-    // Transit is slightly preferred when journey times are similar,
-    // while significantly faster alternatives are allowed to rank
-    // higher.
+    // Rail is prioritized ahead of non-rail options. Other transit receives
+    // a modest preference when journey times are reasonably close, while
+    // significantly faster alternatives can still rank higher.
     // ------------------------------------------------------------
 
     final ranked = _rankItineraries(combinedItineraries);
@@ -632,6 +632,8 @@ class RoutingService {
     final result = List<Map<String, dynamic>>.from(itineraries);
 
     result.sort((a, b) {
+      final railComparison = compareRailPriority(a, b);
+      if (railComparison != 0) return railComparison;
       final durationA =
           (a['duration'] as num?)?.toDouble() ??
           double.infinity;

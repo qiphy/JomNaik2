@@ -1293,11 +1293,11 @@ class _MapViewState extends State<MapView> {
           .join('|');
     }
 
-    // Duration can exclude waiting time in a timetable view. Prefer the
-    // earliest usable public-transport departure rather than a journey that
-    // starts later, while keeping short walking and direct e-hailing options
-    // ahead of a timetable that departs much later.
+    // Rail itineraries stay ahead of non-rail options; walking preferences
+    // and journey details determine the order within each group.
     itineraries.sort((left, right) {
+      final railComparison = compareRailPriority(left, right);
+      if (railComparison != 0) return railComparison;
       if (_walkingPreference != 'standard') {
         final preferenceComparison = _routePreferenceScore(
           left,
@@ -1358,9 +1358,11 @@ class _MapViewState extends State<MapView> {
     }
     final deduplicated = unique.values.toList();
 
-    // Accessibility preferences apply a walking and transfer cost before
-    // incident risk and the usual duration tie-breakers.
+    // Rail routes stay ahead of non-rail options; accessibility preferences
+    // then apply a walking and transfer cost within each group.
     deduplicated.sort((left, right) {
+      final railComparison = compareRailPriority(left, right);
+      if (railComparison != 0) return railComparison;
       final preferenceComparison = _routePreferenceScore(
         left,
       ).compareTo(_routePreferenceScore(right));

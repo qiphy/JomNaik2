@@ -309,6 +309,8 @@ class OfflineRaptorRouter {
     }
 
     availableItineraries.sort((left, right) {
+      final railComparison = compareRailPriority(left, right);
+      if (railComparison != 0) return railComparison;
       final preferenceComparison = preferenceCost(
         left,
       ).compareTo(preferenceCost(right));
