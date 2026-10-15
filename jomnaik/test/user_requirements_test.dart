@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jomride/offline_raptor_router.dart';
 import 'package:jomride/screens/profile_screen.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -28,7 +29,8 @@ void main() {
       );
 
       expect(result, isNotNull);
-      final itineraries = (result!['itineraries'] as List).cast<Map<String, dynamic>>();
+      final itineraries = (result!['itineraries'] as List)
+          .cast<Map<String, dynamic>>();
       expect(itineraries, isNotEmpty);
 
       // Verify at least one itinerary uses the KTMB Seremban Line
@@ -36,27 +38,71 @@ void main() {
         final legs = (it['legs'] as List).cast<Map<String, dynamic>>();
         return legs.any(
           (leg) =>
-              leg['routeShortName'].toString().toLowerCase().contains('seremban') ||
+              leg['routeShortName'].toString().toLowerCase().contains(
+                'seremban',
+              ) ||
               leg['routeShortName'].toString().toLowerCase().contains('ktm') ||
-              leg['routeShortName'].toString().toLowerCase().contains('port klang'),
+              leg['routeShortName'].toString().toLowerCase().contains(
+                'port klang',
+              ),
         );
       });
-      expect(usesKtmb, isTrue, reason: 'Route from Batu Caves to KL Sentral must utilize KTMB rail service.');
+      expect(
+        usesKtmb,
+        isTrue,
+        reason:
+            'Route from Batu Caves to KL Sentral must utilize KTMB rail service.',
+      );
     });
 
-    testWidgets('Profile page provides feedback form button with Microsoft Form link', (WidgetTester tester) async {
+    testWidgets(
+      'Profile page provides feedback form button with Microsoft Form link',
+      (WidgetTester tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: ProfilePage(
+                isSupabaseConfigured: false,
+                onStationLocationTrackingChanged: (_) {},
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('Give feedback'), findsOneWidget);
+      },
+    );
+
+    testWidgets('signed-in profile scrolls to the sign-out control', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(360, 420);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: ProfilePage(
-              isSupabaseConfigured: false,
+            body: SignedInProfile(
+              user: User.fromJson({
+                'id': 'test-user',
+                'app_metadata': <String, dynamic>{},
+                'user_metadata': <String, dynamic>{},
+                'aud': 'authenticated',
+                'created_at': '2026-10-15T00:00:00.000Z',
+                'email': 'test@example.com',
+              })!,
               onStationLocationTrackingChanged: (_) {},
             ),
           ),
         ),
       );
 
-      expect(find.text('Give feedback'), findsOneWidget);
+      expect(find.text('Sign out'), findsNothing);
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pumpAndSettle();
+      expect(find.text('Sign out'), findsOneWidget);
     });
   });
 }

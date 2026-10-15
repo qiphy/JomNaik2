@@ -238,7 +238,9 @@ class _ProfilePageState extends State<ProfilePage> {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.feedback_outlined),
                 title: const Text('Give feedback'),
-                subtitle: const Text('Share your thoughts or suggest improvements'),
+                subtitle: const Text(
+                  'Share your thoughts or suggest improvements',
+                ),
                 trailing: const Icon(Icons.open_in_new, size: 20),
                 onTap: () => _launchFeedbackForm(context),
               ),
@@ -349,80 +351,77 @@ class _SignedInProfileState extends State<SignedInProfile> {
   @override
   Widget build(BuildContext context) {
     return SafeArea(
-      child: Padding(
+      child: ListView(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Icon(Icons.account_circle, size: 72),
-            const SizedBox(height: 16),
-            Text(
-              'You are signed in',
-              textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+        children: [
+          const Icon(Icons.account_circle, size: 72),
+          const SizedBox(height: 16),
+          Text(
+            'You are signed in',
+            textAlign: TextAlign.center,
+            style: Theme.of(
+              context,
+            ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            widget.user.email ?? 'JomRide account',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 32),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.location_searching),
+            title: const Text('Station location tracking'),
+            subtitle: const Text(
+              'Ask which nearby station or stop you are at when an interchange has stops within 20 metres.',
             ),
-            const SizedBox(height: 8),
-            Text(
-              widget.user.email ?? 'JomRide account',
-              textAlign: TextAlign.center,
+            value: _locationTrackingEnabled,
+            onChanged: _isSavingLocationTracking
+                ? null
+                : _setLocationTrackingEnabled,
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            isExpanded: true,
+            initialValue: _accessibilityMode,
+            decoration: const InputDecoration(
+              labelText: 'Walking accessibility preference',
+              helperText:
+                  'Changes route ranking and walking-time estimates. Stair-free access is not verified.',
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 32),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.location_searching),
-              title: const Text('Station location tracking'),
-              subtitle: const Text(
-                'Ask which nearby station or stop you are at when an interchange has stops within 20 metres.',
+            items: const [
+              DropdownMenuItem(
+                value: 'standard',
+                child: Text('Standard walking'),
               ),
-              value: _locationTrackingEnabled,
-              onChanged: _isSavingLocationTracking
-                  ? null
-                  : _setLocationTrackingEnabled,
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _accessibilityMode,
-              decoration: const InputDecoration(
-                labelText: 'Walking accessibility preference',
-                helperText:
-                    'Changes route ranking and walking-time estimates. Stair-free access is not verified.',
-                border: OutlineInputBorder(),
+              DropdownMenuItem(
+                value: 'avoid_stairs',
+                child: Text('Avoid stairs'),
               ),
-              items: const [
-                DropdownMenuItem(
-                  value: 'standard',
-                  child: Text('Standard walking'),
-                ),
-                DropdownMenuItem(
-                  value: 'avoid_stairs',
-                  child: Text('Avoid stairs'),
-                ),
-                DropdownMenuItem(
-                  value: 'step_free',
-                  child: Text('Step-free estimate'),
-                ),
-              ],
-              onChanged: _isSavingAccessibility ? null : _setAccessibilityMode,
-            ),
-            const SizedBox(height: 16),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.feedback_outlined),
-              title: const Text('Give feedback'),
-              subtitle: const Text('Share your thoughts or suggest improvements'),
-              trailing: const Icon(Icons.open_in_new, size: 20),
-              onTap: () => _launchFeedbackForm(context),
-            ),
-            const Spacer(),
-            OutlinedButton.icon(
-              onPressed: () => Supabase.instance.client.auth.signOut(),
-              icon: const Icon(Icons.logout),
-              label: const Text('Sign out'),
-            ),
-          ],
-        ),
+              DropdownMenuItem(
+                value: 'step_free',
+                child: Text('Step-free estimate'),
+              ),
+            ],
+            onChanged: _isSavingAccessibility ? null : _setAccessibilityMode,
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.feedback_outlined),
+            title: const Text('Give feedback'),
+            subtitle: const Text('Share your thoughts or suggest improvements'),
+            trailing: const Icon(Icons.open_in_new, size: 20),
+            onTap: () => _launchFeedbackForm(context),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => Supabase.instance.client.auth.signOut(),
+            icon: const Icon(Icons.logout),
+            label: const Text('Sign out'),
+          ),
+        ],
       ),
     );
   }
