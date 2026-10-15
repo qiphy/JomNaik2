@@ -1,16 +1,18 @@
-int compareRailPriority(
-  Map<String, dynamic> left,
-  Map<String, dynamic> right,
-) {
+int compareRailPriority(Map<String, dynamic> left, Map<String, dynamic> right) {
   bool usesRail(Map<String, dynamic> itinerary) {
     final rawLegs = itinerary['legs'];
     if (rawLegs is! List) return false;
-    return rawLegs.any((leg) {
-      if (leg is! Map) return false;
-      return const {'RAIL', 'SUBWAY', 'TRAM'}.contains(
-        leg['mode']?.toString().toUpperCase(),
-      );
-    });
+    final transitModes = rawLegs
+        .whereType<Map>()
+        .map((leg) {
+          return leg['mode']?.toString().toUpperCase() ?? '';
+        })
+        .where((mode) => mode != 'WALK' && mode != 'HAIL')
+        .toList();
+    const railModes = {'RAIL', 'SUBWAY', 'TRAM'};
+    return transitModes.isNotEmpty &&
+        transitModes.every(railModes.contains) &&
+        transitModes.any(railModes.contains);
   }
 
   final leftUsesRail = usesRail(left);
@@ -82,10 +84,8 @@ class Itinerary {
       incidentDelaySeconds > 0 ||
       legs.any((leg) => leg.incidentReports.isNotEmpty);
 
-  int get incidentReportsCount => legs.fold<int>(
-        0,
-        (sum, leg) => sum + leg.incidentReports.length,
-      );
+  int get incidentReportsCount =>
+      legs.fold<int>(0, (sum, leg) => sum + leg.incidentReports.length);
 }
 
 class ItineraryLeg {
@@ -171,8 +171,8 @@ class ItineraryLeg {
     final sign = terminus?.trim().isNotEmpty == true
         ? terminus!.trim()
         : (headsign?.trim().isNotEmpty == true
-            ? headsign!.trim()
-            : toPlace?.name.trim() ?? '');
+              ? headsign!.trim()
+              : toPlace?.name.trim() ?? '');
     if (sign.isEmpty) return 'Direction unavailable';
 
     final toMatches = RegExp(

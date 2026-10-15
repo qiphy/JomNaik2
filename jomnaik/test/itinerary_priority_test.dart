@@ -14,8 +14,16 @@ void main() {
         {'mode': 'BUS'},
       ],
     };
+    final mixed = {
+      'legs': [
+        {'mode': 'SUBWAY'},
+        {'mode': 'BUS'},
+      ],
+    };
 
     expect(compareRailPriority(rail, bus), -1);
+    expect(compareRailPriority(rail, mixed), -1);
+    expect(compareRailPriority(mixed, rail), 1);
     expect(compareRailPriority(bus, rail), 1);
     expect(compareRailPriority(bus, bus), 0);
   });
