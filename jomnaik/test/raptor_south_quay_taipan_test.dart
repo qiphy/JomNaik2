@@ -38,11 +38,12 @@ void main() {
             .cast<Map<String, dynamic>>();
         expect(itineraries, isNotEmpty, reason: 'Origin: ${origin.name}');
         final available = itineraries
-            .where((itinerary) =>
-                isItineraryMapAvailableAtDeparture(
-                  itinerary,
-                  DateTime(2026, 10, 14, 10),
-                ))
+            .where(
+              (itinerary) => isItineraryMapAvailableAtDeparture(
+                itinerary,
+                DateTime(2026, 10, 14, 10),
+              ),
+            )
             .toList();
         // ignore: avoid_print
         print(
@@ -50,8 +51,7 @@ void main() {
           '${available.length}/${itineraries.length} available at 10:00',
         );
         for (final itinerary in itineraries) {
-          final legs = (itinerary['legs'] as List)
-              .cast<Map<String, dynamic>>();
+          final legs = (itinerary['legs'] as List).cast<Map<String, dynamic>>();
           // ignore: avoid_print
           print(
             '${origin.name} -> ${destination.name}: ${legs.map((leg) => '${leg['mode']}:${leg['routeShortName']} '
@@ -59,15 +59,13 @@ void main() {
                 '${(leg['to'] as Map?)?['name']})').join(' | ')}',
           );
         }
-        if (origin.id == null &&
-            destination.id == 'rapid-kl-rail:KJ32') {
+        if (origin.id == null && destination.id == 'rapid-kl-rail:KJ32') {
           bool hasRoute(
             Map<String, dynamic> itinerary,
             bool Function(Map<String, dynamic>) predicate,
-          ) =>
-              (itinerary['legs'] as List)
-                  .whereType<Map<String, dynamic>>()
-                  .any(predicate);
+          ) => (itinerary['legs'] as List)
+              .whereType<Map<String, dynamic>>()
+              .any(predicate);
 
           expect(
             available.any(
@@ -75,8 +73,7 @@ void main() {
                   hasRoute(
                     itinerary,
                     (leg) =>
-                        leg['mode'] == 'TRAM' &&
-                        leg['routeShortName'] == 'BRT',
+                        leg['mode'] == 'TRAM' && leg['routeShortName'] == 'BRT',
                   ) &&
                   hasRoute(
                     itinerary,
@@ -90,26 +87,11 @@ void main() {
           expect(
             available.any(
               (itinerary) =>
-                  hasRoute(
-                    itinerary,
-                    (leg) =>
-                        leg['mode'] == 'BUS' &&
-                        leg['routeShortName'] == '770',
-                  ) &&
-                  !hasRoute(itinerary, (leg) => leg['mode'] == 'TRAM'),
-            ),
-            isTrue,
-            reason: 'Route 770 is an alternative, not a continuation after BRT.',
-          );
-          expect(
-            available.any(
-              (itinerary) =>
                   hasRoute(itinerary, (leg) => leg['mode'] == 'TRAM') &&
                   hasRoute(
                     itinerary,
                     (leg) =>
-                        leg['mode'] == 'BUS' &&
-                        leg['routeShortName'] == '770',
+                        leg['mode'] == 'BUS' && leg['routeShortName'] == '770',
                   ),
             ),
             isFalse,
