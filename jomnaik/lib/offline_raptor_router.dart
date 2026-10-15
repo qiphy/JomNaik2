@@ -14,6 +14,7 @@ class OfflineRaptorRouter {
   static const _maximumTransitWaitSeconds = 45 * 60;
   Map<String, dynamic>? _data;
   List<_Trip>? _trips;
+  bool _shapeAssetsLoaded = false;
   final _store = OfflineBundleStore();
 
   /// Polls the optional small backend for a newer static timetable bundle.
@@ -50,7 +51,51 @@ class OfflineRaptorRouter {
       await _store.writeBundle(bundle, manifest['version'] as String);
       _data = Map<String, dynamic>.from(decoded);
       _trips = null;
+      _shapeAssetsLoaded = false;
     } catch (_) {}
+  }
+
+  Future<List<List<double>>> brtGeometryForLeg({
+    required String routeShortName,
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+  }) async {
+    final data = await _load();
+    final routeShapes = data['routeShapes'];
+    if (routeShapes is! List) return const [];
+
+    final requestedName = routeShortName.trim().toUpperCase();
+    String? routeId;
+    for (final feature in routeShapes) {
+      if (feature is! Map || feature['properties'] is! Map) continue;
+      final properties = feature['properties'] as Map;
+      final featureRouteId = properties['route_id']?.toString();
+      final featureShortName =
+          properties['route_short_name']?.toString().toUpperCase() ?? '';
+      final featureLongName =
+          properties['route_long_name']?.toString().toUpperCase() ?? '';
+      if (featureShortName == requestedName ||
+          featureRouteId?.toUpperCase() == requestedName ||
+          (requestedName.contains('BRT') && featureLongName.contains('BRT'))) {
+        routeId = featureRouteId;
+        break;
+      }
+    }
+    if (routeId == null) return const [];
+
+    return _routeGeometry(
+      routeId: routeId,
+      fromStop: '__brt_from__',
+      toStop: '__brt_to__',
+      stops: {
+        '__brt_from__': ['BRT origin', fromLat, fromLon],
+        '__brt_to__': ['BRT destination', toLat, toLon],
+      },
+      shapes: routeShapes,
+      fallback: const [],
+    );
   }
 
   Future<Map<String, dynamic>?> plan({
@@ -380,25 +425,32 @@ class OfflineRaptorRouter {
   }
 
   Future<Map<String, dynamic>> _load() async {
-    if (_data != null) return _data!;
-    final raw =
-        await _store.readBundle() ?? await rootBundle.loadString(_asset);
-    final decoded = Map<String, dynamic>.from(jsonDecode(raw) as Map);
-    try {
-      final rail = jsonDecode(
-        await rootBundle.loadString('assets/transit/rail_lines.geojson'),
-      );
-      if (rail is Map) decoded['railShapes'] = rail['features'];
-    } catch (_) {}
-    try {
-      final transit = jsonDecode(
-        await rootBundle.loadString(
-          'assets/65f71978-dde6-4d73-86a7-767322b8edbb/Rapid KL.geojson',
-        ),
-      );
-      if (transit is Map) decoded['routeShapes'] = transit['features'];
-    } catch (_) {}
-    _data = decoded;
+    if (_data == null) {
+      final raw =
+          await _store.readBundle() ?? await rootBundle.loadString(_asset);
+      _data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    }
+    if (!_shapeAssetsLoaded) {
+      try {
+        final rail = jsonDecode(
+          await rootBundle.loadString('assets/transit/rail_lines.geojson'),
+        );
+        if (_data!['railShapes'] == null && rail is Map) {
+          _data!['railShapes'] = rail['features'];
+        }
+      } catch (_) {}
+      try {
+        final transit = jsonDecode(
+          await rootBundle.loadString(
+            'assets/65f71978-dde6-4d73-86a7-767322b8edbb/Rapid KL.geojson',
+          ),
+        );
+        if (_data!['routeShapes'] == null && transit is Map) {
+          _data!['routeShapes'] = transit['features'];
+        }
+      } catch (_) {}
+      _shapeAssetsLoaded = true;
+    }
     return _data!;
   }
 

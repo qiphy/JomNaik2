@@ -93,6 +93,25 @@ void main() {
       secondLeg['routeShortName'].toString().toUpperCase(),
       anyOf(contains('BRT'), contains('SUNWAY LINE')),
     );
+    final brtGeometry = secondLeg['legGeometry'] as Map;
+    final brtCoordinates = brtGeometry['coordinates'] as List;
+    expect(
+      brtCoordinates.length,
+      greaterThan(2),
+      reason: 'BRT geometry should follow its GTFS alignment, not just its stops.',
+    );
+  });
+
+  test('BRT shape lookup replaces endpoint-only online geometry', () async {
+    final geometry = await OfflineRaptorRouter().brtGeometryForLeg(
+      routeShortName: 'SUNWAY LINE',
+      fromLat: 3.055246,
+      fromLon: 101.591972,
+      toLat: 3.082856,
+      toLon: 101.612238,
+    );
+
+    expect(geometry.length, greaterThan(2));
   });
 
   test('South Quay to SS 18 keeps the walkable USJ 7 rail stop in search', () async {
