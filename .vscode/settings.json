@@ -1,7 +1,3 @@
 {
-    "CodeGPT.apiKey": "Groq",
-    "claudeCode.spinnerVerbs": {
-        "mode": "append",
-        "verbs": []
-    }
+    "CodeGPT.apiKey": "Groq"
 }
