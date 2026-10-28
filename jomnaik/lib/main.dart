@@ -987,7 +987,17 @@ class _MapViewState extends State<MapView> {
       fromStopId: effectiveFromStopId,
       toStopId: effectiveToStopId,
     );
-    await _showRouteChoices(routeData);
+    await _showRouteChoices(
+      routeData,
+      refreshRoute: () => _refreshRouteOptions(
+        fromLat: originLat,
+        fromLon: originLon,
+        toLat: destination.lat,
+        toLon: destination.lon,
+        fromStopId: effectiveFromStopId,
+        toStopId: effectiveToStopId,
+      ),
+    );
   }
 
   Future<_StartChoice?> _chooseCurrentOrManualStart() {
@@ -1271,6 +1281,7 @@ class _MapViewState extends State<MapView> {
   Future<void> _showRouteChoices(
     Map<String, dynamic>? routeData, {
     ValueChanged<Map<String, dynamic>>? onSelectItinerary,
+    Future<Map<String, dynamic>?> Function()? refreshRoute,
   }) async {
     if (routeData == null || routeData['itineraries'] is! List) return;
     final itineraries = (routeData['itineraries'] as List<dynamic>)
@@ -1395,20 +1406,90 @@ class _MapViewState extends State<MapView> {
 
     if (_isRouteChoicesOpen || !mounted) return;
     setState(() => _isRouteChoicesOpen = true);
+    Timer? refreshTimer;
+    StateSetter? updateSheet;
+    var refreshInFlight = false;
+    var routesUpdated = false;
+    var sheetOpen = true;
+    String choicesSignature(Iterable<Map<String, dynamic>> choices) {
+      final signatures = choices.map((itinerary) {
+        final legs = _itineraryLegs(itinerary);
+        final firstDeparture = legs.isEmpty
+            ? ''
+            : legs.first['startTime']?.toString() ?? '';
+        final lastArrival = legs.isEmpty
+            ? ''
+            : legs.last['endTime']?.toString() ?? '';
+        return '${itinerary['routeCategory'] ?? ''}:${routeSignature(itinerary)}:$firstDeparture:$lastArrival';
+      }).toList()..sort();
+      return signatures.join('||');
+    }
+
+    if (refreshRoute != null) {
+      refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+        if (refreshInFlight || !mounted || !sheetOpen) return;
+        refreshInFlight = true;
+        try {
+          final refreshedData = await refreshRoute();
+          final refreshedRaw = refreshedData?['itineraries'];
+          if (!mounted || !sheetOpen || refreshedRaw is! List) return;
+          final refreshed = refreshedRaw
+              .whereType<Map>()
+              .map(Map<String, dynamic>.from)
+              .toList();
+          if (choicesSignature(refreshed) != choicesSignature(itineraries)) {
+            itineraries
+              ..clear()
+              ..addAll(refreshed);
+            updateSheet?.call(() => routesUpdated = true);
+          }
+        } catch (error) {
+          debugPrint('Route refresh failed: $error');
+        } finally {
+          refreshInFlight = false;
+        }
+      });
+    }
+
     try {
       await showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (context) => RouteChoicesSheet(
-          itineraries: itineraries,
-          onSelectItinerary: onSelectItinerary ?? _applyItinerary,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setSheetState) {
+            updateSheet = setSheetState;
+            return RouteChoicesSheet(
+              itineraries: itineraries,
+              onSelectItinerary: onSelectItinerary ?? _applyItinerary,
+              routesUpdated: routesUpdated,
+            );
+          },
         ),
       );
     } finally {
+      sheetOpen = false;
+      refreshTimer?.cancel();
       if (mounted) setState(() => _isRouteChoicesOpen = false);
     }
   }
+
+  Future<Map<String, dynamic>?> _refreshRouteOptions({
+    required double fromLat,
+    required double fromLon,
+    required double toLat,
+    required double toLon,
+    String? fromStopId,
+    String? toStopId,
+  }) => _requestRoute(
+    fromLat: fromLat,
+    fromLon: fromLon,
+    toLat: toLat,
+    toLon: toLon,
+    fromStopId: fromStopId,
+    toStopId: toStopId,
+    departure: DateTime.now(),
+  );
 
   Future<void> _applyItinerary(Map<String, dynamic> itinerary) async {
     _stopGuidanceIncidentPolling();
@@ -2168,6 +2249,8 @@ class _MapViewState extends State<MapView> {
       // If backend had no available transit at the departure time, check offline RAPTOR
       if (!hasTransitItinerary(validItineraries)) {
         try {
+          final liveBusRouteIds = await _offlineRaptorRouter
+              .fetchLiveBusRouteIds(_backendBaseUrl);
           final offlineTransit = await _offlineRaptorRouter.plan(
             fromLat: fromLat,
             fromLon: fromLon,
@@ -2177,6 +2260,7 @@ class _MapViewState extends State<MapView> {
             toStopId: toStopId,
             departure: when,
             walkingPreference: _walkingPreference,
+            liveBusRouteIds: liveBusRouteIds,
           );
           final offlineItineraries = offlineTransit?['itineraries'];
           if (offlineItineraries is List) {
@@ -2284,6 +2368,9 @@ class _MapViewState extends State<MapView> {
       departure: when,
     );
     try {
+      final liveBusRouteIds = await _offlineRaptorRouter.fetchLiveBusRouteIds(
+        _backendBaseUrl,
+      );
       final result = await _offlineRaptorRouter.plan(
         fromLat: fromLat,
         fromLon: fromLon,
@@ -2293,6 +2380,7 @@ class _MapViewState extends State<MapView> {
         toStopId: toStopId,
         departure: when,
         walkingPreference: _walkingPreference,
+        liveBusRouteIds: liveBusRouteIds,
       );
       if (result != null) {
         final rawItineraries = result['itineraries'] as List? ?? [];

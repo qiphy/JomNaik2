@@ -51,6 +51,45 @@ void main() {
       }
     });
 
+    test('RAPTOR excludes buses without a live GPS route', () async {
+      final router = OfflineRaptorRouter();
+      const fromLat = 3.0617;
+      const fromLon = 101.5969;
+      const toLat = 3.0720;
+      const toLon = 101.5880;
+      final departure = DateTime(2026, 10, 12, 14, 0);
+      final withoutGpsConstraint = await router.plan(
+        fromLat: fromLat,
+        fromLon: fromLon,
+        toLat: toLat,
+        toLon: toLon,
+        departure: departure,
+      );
+      final withoutGps = (withoutGpsConstraint?['itineraries'] as List? ?? [])
+          .whereType<Map<String, dynamic>>();
+      final busesWithoutConstraint = withoutGps
+          .expand((itinerary) => itinerary['legs'] as List)
+          .where((leg) => leg is Map && leg['mode'] == 'BUS');
+      expect(busesWithoutConstraint, isNotEmpty);
+
+      final filtered = await router.plan(
+        fromLat: fromLat,
+        fromLon: fromLon,
+        toLat: toLat,
+        toLon: toLon,
+        departure: departure,
+        liveBusRouteIds: const {},
+      );
+      final filteredItineraries = (filtered?['itineraries'] as List? ?? [])
+          .whereType<Map<String, dynamic>>();
+      expect(
+        filteredItineraries
+            .expand((itinerary) => itinerary['legs'] as List)
+            .where((leg) => leg is Map && leg['mode'] == 'BUS'),
+        isEmpty,
+      );
+    });
+
     test('Bus departures prioritize estimated arrival times first, falling back to scheduled times', () {
       final nowMs = DateTime(2026, 10, 12, 14, 0).millisecondsSinceEpoch;
 

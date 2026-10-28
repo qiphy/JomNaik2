@@ -6,9 +6,8 @@ import 'package:http/http.dart' as http;
 import 'models/itinerary.dart';
 import 'offline_bundle_store.dart';
 
-/// Static, on-device public-transit fallback. It deliberately has no live
-/// vehicle, traffic, weather, or crowdsourcing inputs; callers must label its
-/// results accordingly.
+/// On-device public-transit routing against the bundled timetable.
+/// Callers can constrain bus trips to routes with fresh live vehicle positions.
 class OfflineRaptorRouter {
   static const _asset = 'assets/offline/raptor_klang_valley.json';
   static const _maximumTransitWaitSeconds = 45 * 60;
@@ -98,6 +97,113 @@ class OfflineRaptorRouter {
     );
   }
 
+  static const _maximumBusPositionAge = Duration(seconds: 120);
+
+  /// Fetches fresh bus positions and maps them onto the bundled timetable.
+  /// An unavailable feed returns an empty set so scheduled buses are not shown
+  /// as live when the app cannot verify their positions.
+  Future<Set<String>> fetchLiveBusRouteIds(String baseUrl) async {
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl/api/realtime/vehicles'))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return const {};
+      final payload = jsonDecode(response.body);
+      if (payload is! Map || payload['vehicles'] is! List) return const {};
+      final data = await _load();
+      return liveBusRouteIdsFromVehicles(
+        vehicles: payload['vehicles'] as List,
+        routes: Map<String, dynamic>.from(data['routes'] as Map),
+        trips: data['trips'] as List,
+      );
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Returns static bus route IDs backed by a fresh position from a bus feed.
+  /// Trip IDs are preferred because they identify a scheduled service precisely;
+  /// route IDs are used when the feed does not provide a matching trip.
+  static Set<String> liveBusRouteIdsFromVehicles({
+    required List<dynamic> vehicles,
+    required Map<String, dynamic> routes,
+    required List<dynamic> trips,
+    DateTime? now,
+  }) {
+    final currentTime = (now ?? DateTime.now()).toUtc();
+    final tripRoutes = <String, String>{};
+    for (final rawTrip in trips.whereType<List>()) {
+      if (rawTrip.length < 2) continue;
+      tripRoutes[rawTrip[0].toString().toLowerCase()] = rawTrip[1].toString();
+    }
+
+    String? knownRoute(String? id) {
+      if (id == null || id.isEmpty) return null;
+      final normalized = id.toLowerCase();
+      for (final routeId in routes.keys) {
+        final candidate = routeId.toString();
+        final normalizedCandidate = candidate.toLowerCase();
+        if (normalized == normalizedCandidate ||
+            normalized.endsWith(':$normalizedCandidate') ||
+            normalizedCandidate.endsWith(':$normalized')) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    final liveRouteIds = <String>{};
+    for (final rawVehicle in vehicles.whereType<Map>()) {
+      final feed = rawVehicle['feed']?.toString();
+      if (feed != 'rapid-kl-bus' && feed != 'rapid-kl-bus-mrtfeeder') {
+        continue;
+      }
+      final latitude = rawVehicle['lat'];
+      final longitude = rawVehicle['lon'];
+      final timestamp = rawVehicle['timestamp'];
+      if (latitude is! num ||
+          longitude is! num ||
+          !latitude.isFinite ||
+          !longitude.isFinite ||
+          latitude < -90 ||
+          latitude > 90 ||
+          longitude < -180 ||
+          longitude > 180 ||
+          timestamp is! num) {
+        continue;
+      }
+      final age = currentTime.difference(
+        DateTime.fromMillisecondsSinceEpoch(
+          (timestamp * 1000).round(),
+          isUtc: true,
+        ),
+      );
+      if (age > _maximumBusPositionAge || age < const Duration(seconds: -30)) {
+        continue;
+      }
+
+      final tripId = rawVehicle['tripId']?.toString().toLowerCase();
+      String? tripRoute = tripId == null ? null : tripRoutes[tripId];
+      if (tripId != null && tripRoute == null) {
+        for (final entry in tripRoutes.entries) {
+          if (entry.key.endsWith(':$tripId') ||
+              tripId.endsWith(':${entry.key}')) {
+            tripRoute = entry.value;
+            break;
+          }
+        }
+      }
+      final routeId = knownRoute(tripRoute) ??
+          knownRoute(rawVehicle['routeId']?.toString());
+      final route = routeId == null ? null : routes[routeId];
+      final routeType = route is List && route.length > 2 ? route[2] : null;
+      if (routeId != null && (routeType == 3 || routeType == '3')) {
+        liveRouteIds.add(routeId);
+      }
+    }
+    return liveRouteIds;
+  }
+
   Future<Map<String, dynamic>?> plan({
     required double fromLat,
     required double fromLon,
@@ -107,6 +213,7 @@ class OfflineRaptorRouter {
     String? fromStopId,
     String? toStopId,
     String walkingPreference = 'standard',
+    Set<String>? liveBusRouteIds,
   }) async {
     final data = await _load();
     final trips = _trips ??= (data['trips'] as List)
@@ -171,9 +278,19 @@ class OfflineRaptorRouter {
       return null;
     }
 
+    final routes = Map<String, dynamic>.from(data['routes'] as Map);
+    bool shouldIncludeTrip(_Trip trip) {
+      if (liveBusRouteIds == null) return true;
+      final route = routes[trip.routeId];
+      final routeType = route is List && route.length > 2 ? route[2] : null;
+      final isBus = routeType == 3 || routeType == '3';
+      return !isBus || liveBusRouteIds.contains(trip.routeId);
+    }
+
     final activeTrips = <_Trip>[];
     for (final trip in trips) {
-      if (_serviceActive(trip.serviceId, when, data)) {
+      if (shouldIncludeTrip(trip) &&
+          _serviceActive(trip.serviceId, when, data)) {
         activeTrips.add(trip);
       }
     }
@@ -182,7 +299,8 @@ class OfflineRaptorRouter {
     if (startSeconds < 14400) {
       final yesterday = when.subtract(const Duration(days: 1));
       for (final trip in trips) {
-        if (_serviceActive(trip.serviceId, yesterday, data)) {
+        if (shouldIncludeTrip(trip) &&
+            _serviceActive(trip.serviceId, yesterday, data)) {
           final hasOvernight = trip.calls
                   .any((c) => c.arrival >= 86400 || c.departure >= 86400) ||
               trip.frequencies.any((f) => f.length >= 2 && f[1] >= 86400);

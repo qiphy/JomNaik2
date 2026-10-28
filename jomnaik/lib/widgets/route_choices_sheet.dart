@@ -7,10 +7,12 @@ class RouteChoicesSheet extends StatelessWidget {
     super.key,
     required this.itineraries,
     required this.onSelectItinerary,
+    this.routesUpdated = false,
   });
 
   final List<Map<String, dynamic>> itineraries;
   final ValueChanged<Map<String, dynamic>> onSelectItinerary;
+  final bool routesUpdated;
 
   List<Map<String, dynamic>> _itineraryLegs(Map<String, dynamic> itinerary) {
     final rawLegs = itinerary['legs'];
@@ -181,6 +183,37 @@ class RouteChoicesSheet extends StatelessWidget {
                   ),
                 ],
               ),
+              if (routesUpdated) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.update,
+                        size: 18,
+                        color: theme.colorScheme.onSecondaryContainer,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Routes updated with the latest live bus data.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSecondaryContainer,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               if (!hasTransit)
                 Container(

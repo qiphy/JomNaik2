@@ -301,6 +301,9 @@ class RoutingService {
   }) async {
     final when = departure ?? DateTime.now();
     try {
+      final liveBusRouteIds = await offlineRouter.fetchLiveBusRouteIds(
+        backendBaseUrl,
+      );
       final result = await offlineRouter.plan(
         fromLat: fromLat,
         fromLon: fromLon,
@@ -309,6 +312,7 @@ class RoutingService {
         fromStopId: fromStopId,
         toStopId: toStopId,
         departure: when,
+        liveBusRouteIds: liveBusRouteIds,
       );
 
       if (result == null || result['itineraries'] is! List) {
