@@ -8,11 +8,13 @@ class RouteChoicesSheet extends StatelessWidget {
     required this.itineraries,
     required this.onSelectItinerary,
     this.routesUpdated = false,
+    this.drivingEstimate,
   });
 
   final List<Map<String, dynamic>> itineraries;
   final ValueChanged<Map<String, dynamic>> onSelectItinerary;
   final bool routesUpdated;
+  final Future<Map<String, dynamic>?>? drivingEstimate;
 
   List<Map<String, dynamic>> _itineraryLegs(Map<String, dynamic> itinerary) {
     final rawLegs = itinerary['legs'];
@@ -312,7 +314,53 @@ class RouteChoicesSheet extends StatelessWidget {
                         ),
                         subtitle: Padding(
                           padding: const EdgeInsets.only(top: 4),
-                          child: Text(_routeOptionSummary(itinerary)),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(_routeOptionSummary(itinerary)),
+                              if (drivingEstimate != null &&
+                                  _itineraryLegs(itinerary).any((leg) {
+                                    final mode = leg['mode']
+                                        ?.toString()
+                                        .toUpperCase();
+                                    return mode != null &&
+                                        mode != 'WALK' &&
+                                        mode != 'HAIL';
+                                  }))
+                                FutureBuilder<Map<String, dynamic>?>(
+                                  future: drivingEstimate,
+                                  builder: (context, snapshot) {
+                                    final seconds =
+                                        snapshot.data?['travelTimeSeconds'];
+                                    if (seconds is! num) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    final driveMinutes = (seconds / 60).round();
+                                    final transitMinutes = option.duration
+                                        .round();
+                                    final difference =
+                                        transitMinutes - driveMinutes;
+                                    final comparison = difference == 0
+                                        ? 'about the same time'
+                                        : difference > 0
+                                        ? 'drive is about $difference min faster'
+                                        : 'transit is about ${difference.abs()} min faster';
+                                    return Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        'Traffic-aware drive: $driveMinutes min • $comparison',
+                                        style: theme.textTheme.bodySmall
+                                            ?.copyWith(
+                                              color:
+                                                  theme.colorScheme.secondary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                            ],
+                          ),
                         ),
                         trailing: Column(
                           mainAxisAlignment: MainAxisAlignment.center,

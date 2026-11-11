@@ -2,10 +2,7 @@ import 'package:flutter/material.dart';
 import '../../models/transit.dart';
 
 class BusRouteSelectionSheet extends StatelessWidget {
-  const BusRouteSelectionSheet({
-    super.key,
-    required this.routes,
-  });
+  const BusRouteSelectionSheet({super.key, required this.routes});
 
   final List<String> routes;
 
@@ -38,13 +35,143 @@ class BusRouteSelectionSheet extends StatelessWidget {
 }
 
 class IncidentReportSubmission {
-  const IncidentReportSubmission({
-    required this.type,
-    this.comment,
-  });
+  const IncidentReportSubmission({required this.type, this.comment});
 
   final IncidentType type;
   final String? comment;
+}
+
+class FacilityIssueSubmission {
+  const FacilityIssueSubmission({
+    required this.facilityType,
+    required this.issueType,
+    this.comment,
+  });
+
+  final String facilityType;
+  final String issueType;
+  final String? comment;
+}
+
+class FacilityIssueReportSheet extends StatefulWidget {
+  const FacilityIssueReportSheet({super.key, required this.stationName});
+
+  final String stationName;
+
+  @override
+  State<FacilityIssueReportSheet> createState() =>
+      _FacilityIssueReportSheetState();
+}
+
+class _FacilityIssueReportSheetState extends State<FacilityIssueReportSheet> {
+  static const _facilities = <String, String>{
+    'lift': 'Lift',
+    'escalator': 'Escalator',
+    'toilet': 'Toilet',
+    'ticket_machine': 'Ticket machine',
+    'entrance': 'Entrance',
+    'lighting': 'Lighting',
+    'other': 'Other',
+  };
+  static const _issues = <String, String>{
+    'out_of_service': 'Out of service',
+    'blocked': 'Blocked',
+    'damaged': 'Damaged',
+    'unclean': 'Unclean',
+    'other': 'Other',
+  };
+
+  final _commentController = TextEditingController();
+  String _facility = 'lift';
+  String _issue = 'out_of_service';
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        8,
+        20,
+        MediaQuery.of(context).viewInsets.bottom + 24,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Report a facility issue',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 4),
+            Text(widget.stationName),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              initialValue: _facility,
+              decoration: const InputDecoration(labelText: 'Facility'),
+              items: _facilities.entries
+                  .map(
+                    (entry) => DropdownMenuItem(
+                      value: entry.key,
+                      child: Text(entry.value),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) =>
+                  setState(() => _facility = value ?? _facility),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _issue,
+              decoration: const InputDecoration(labelText: 'Issue'),
+              items: _issues.entries
+                  .map(
+                    (entry) => DropdownMenuItem(
+                      value: entry.key,
+                      child: Text(entry.value),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) => setState(() => _issue = value ?? _issue),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _commentController,
+              maxLength: 2000,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'Details (optional)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: () {
+                  final comment = _commentController.text.trim();
+                  Navigator.of(context).pop(
+                    FacilityIssueSubmission(
+                      facilityType: _facility,
+                      issueType: _issue,
+                      comment: comment.isEmpty ? null : comment,
+                    ),
+                  );
+                },
+                child: const Text('Submit report anonymously'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class IncidentTypeSelectionSheet extends StatefulWidget {
@@ -66,7 +193,8 @@ class IncidentTypeSelectionSheet extends StatefulWidget {
       _IncidentTypeSelectionSheetState();
 }
 
-class _IncidentTypeSelectionSheetState extends State<IncidentTypeSelectionSheet> {
+class _IncidentTypeSelectionSheetState
+    extends State<IncidentTypeSelectionSheet> {
   final _commentController = TextEditingController();
 
   @override
@@ -102,8 +230,8 @@ class _IncidentTypeSelectionSheetState extends State<IncidentTypeSelectionSheet>
                     ? 'Reporting for ${widget.stopName} • ${widget.distance!.round()} m away'
                     : 'Reporting for ${widget.stopName}',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -126,9 +254,9 @@ class _IncidentTypeSelectionSheetState extends State<IncidentTypeSelectionSheet>
               const SizedBox(height: 12),
               Text(
                 'Select incident category to submit:',
-                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 6),
               ...IncidentType.values

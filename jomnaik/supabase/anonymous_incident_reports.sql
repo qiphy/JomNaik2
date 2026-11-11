@@ -18,7 +18,11 @@ add column if not exists comment text;
 alter table public.anonymous_incident_reports enable row level security;
 grant insert on public.anonymous_incident_reports to authenticated;
 -- The backend writes through the Supabase service-role REST connection.
-grant insert on public.anonymous_incident_reports to service_role;
+grant insert, select on public.anonymous_incident_reports to service_role;
+create index if not exists anonymous_incident_reports_reported_at_idx
+  on public.anonymous_incident_reports (reported_at desc);
+create index if not exists anonymous_incident_reports_station_time_idx
+  on public.anonymous_incident_reports (station_id, reported_at desc);
 
 drop policy if exists "Authenticated users can add anonymous incident reports"
 on public.anonymous_incident_reports;

@@ -198,21 +198,66 @@ class TrafficCongestion {
 }
 
 class StationIncident {
-  const StationIncident({required this.type, required this.count, this.route});
+  const StationIncident({
+    required this.type,
+    required this.count,
+    this.route,
+    this.comments = const [],
+  });
 
   factory StationIncident.fromJson(Map<String, dynamic> json) {
     return StationIncident(
       type: json['type']?.toString() ?? 'disruption',
       count: json['count'] is num ? (json['count'] as num).toInt() : 1,
       route: json['route']?.toString(),
+      comments:
+          (json['comments'] as List?)
+              ?.whereType<String>()
+              .where((comment) => comment.trim().isNotEmpty)
+              .toList() ??
+          const [],
     );
   }
 
   final String type;
   final int count;
   final String? route;
+  final List<String> comments;
 
   String get label => formatIncidentLabel(type, route);
+}
+
+class StationFacilityReport {
+  const StationFacilityReport({
+    required this.facilityType,
+    required this.issueType,
+    this.comment,
+    this.reportedAt,
+  });
+
+  factory StationFacilityReport.fromJson(Map<String, dynamic> json) =>
+      StationFacilityReport(
+        facilityType: json['facility_type']?.toString() ?? 'other',
+        issueType: json['issue_type']?.toString() ?? 'other',
+        comment: json['comment']?.toString(),
+        reportedAt: json['reported_at']?.toString(),
+      );
+
+  final String facilityType;
+  final String issueType;
+  final String? comment;
+  final String? reportedAt;
+
+  String get label => '${_title(facilityType)}: ${_title(issueType)}';
+
+  static String _title(String value) => value
+      .split('_')
+      .map(
+        (part) => part.isEmpty
+            ? part
+            : '${part[0].toUpperCase()}${part.substring(1)}',
+      )
+      .join(' ');
 }
 
 enum IncidentType {
@@ -311,7 +356,7 @@ class StationCrowd {
     'high' => 'High crowd level',
     'medium' => 'Medium crowd level',
     'low' => 'Low crowd level',
-    _ => 'Low crowd level',
+    _ => 'Crowd data unavailable',
   };
 
   String get peopleLabel {

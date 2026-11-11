@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../models/transit.dart';
+import 'incident_report_sheet.dart';
 
 class StationDetailsSheet extends StatefulWidget {
   const StationDetailsSheet({
@@ -15,6 +16,8 @@ class StationDetailsSheet extends StatefulWidget {
     required this.fetchCrowd,
     required this.fetchCongestion,
     required this.fetchIncidents,
+    required this.fetchFacilityReports,
+    required this.submitFacilityReport,
   });
 
   final String stopId;
@@ -27,6 +30,8 @@ class StationDetailsSheet extends StatefulWidget {
   final Future<StationCrowd?> Function() fetchCrowd;
   final Future<TrafficCongestion?> Function() fetchCongestion;
   final Future<List<StationIncident>> Function() fetchIncidents;
+  final Future<List<StationFacilityReport>> Function() fetchFacilityReports;
+  final Future<void> Function(FacilityIssueSubmission) submitFacilityReport;
 
   @override
   State<StationDetailsSheet> createState() => _StationDetailsSheetState();
@@ -37,6 +42,7 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
   late Future<StationCrowd?> _crowdFuture;
   late Future<TrafficCongestion?> _congestionFuture;
   late Future<List<StationIncident>> _incidentsFuture;
+  late Future<List<StationFacilityReport>> _facilityReportsFuture;
   Timer? _refreshTimer;
 
   @override
@@ -56,6 +62,8 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
           if (widget.transitType == 'bus') {
             _congestionFuture = widget.fetchCongestion();
           }
+          _incidentsFuture = widget.fetchIncidents();
+          _facilityReportsFuture = widget.fetchFacilityReports();
         });
       }
     });
@@ -70,6 +78,22 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
         ? widget.fetchCongestion()
         : Future.value(null);
     _incidentsFuture = widget.fetchIncidents();
+    _facilityReportsFuture = widget.fetchFacilityReports();
+  }
+
+  Future<void> _reportFacilityIssue() async {
+    final submission = await showModalBottomSheet<FacilityIssueSubmission>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) =>
+          FacilityIssueReportSheet(stationName: widget.stopName),
+    );
+    if (submission == null || !mounted) return;
+    await widget.submitFacilityReport(submission);
+    if (mounted) {
+      setState(() => _facilityReportsFuture = widget.fetchFacilityReports());
+    }
   }
 
   @override
@@ -113,7 +137,8 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
     final color = switch (crowd.level) {
       'high' => Colors.red,
       'medium' => Colors.orange,
-      _ => Colors.green,
+      'low' => Colors.green,
+      _ => Colors.blueGrey,
     };
     return Container(
       width: double.infinity,
@@ -249,14 +274,85 @@ class _StationDetailsSheetState extends State<StationDetailsSheet> {
                               ...currentIncidents.map(
                                 (incident) => Padding(
                                   padding: const EdgeInsets.only(bottom: 4),
-                                  child: Text(
-                                    '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '• ${incident.label}${incident.count > 1 ? ' (${incident.count})' : ''}',
+                                      ),
+                                      ...incident.comments.map(
+                                        (comment) => Padding(
+                                          padding: const EdgeInsets.only(
+                                            left: 12,
+                                            top: 2,
+                                          ),
+                                          child: Text('“$comment”'),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
                             ],
                           ],
                         ),
+                      );
+                    },
+                  ),
+                  Text(
+                    'Station facilities',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  if (widget.stop != null)
+                    OutlinedButton.icon(
+                      onPressed: _reportFacilityIssue,
+                      icon: const Icon(Icons.build_outlined),
+                      label: const Text('Report a facility issue'),
+                    ),
+                  FutureBuilder<List<StationFacilityReport>>(
+                    future: _facilityReportsFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return const Padding(
+                          padding: EdgeInsets.only(bottom: 12),
+                          child: Text('Facility reports are unavailable.'),
+                        );
+                      }
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 10),
+                          child: LinearProgressIndicator(),
+                        );
+                      }
+                      final reports = snapshot.data ?? const [];
+                      if (reports.isEmpty) {
+                        return const Padding(
+                          padding: EdgeInsets.only(bottom: 16),
+                          child: Text(
+                            'No facility reports in the last 7 days.',
+                          ),
+                        );
+                      }
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: reports
+                            .map(
+                              (report) => ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: const Icon(
+                                  Icons.report_problem_outlined,
+                                ),
+                                title: Text(report.label),
+                                subtitle:
+                                    report.comment == null ||
+                                        report.comment!.isEmpty
+                                    ? null
+                                    : Text(report.comment!),
+                              ),
+                            )
+                            .toList(),
                       );
                     },
                   ),

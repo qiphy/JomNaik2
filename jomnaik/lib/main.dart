@@ -173,6 +173,8 @@ class _MapViewState extends State<MapView> {
   bool _isRouteChoicesOpen = false;
   bool _suppressMapTapFromOverlay = false;
   Timer? _mapTapSuppressionTimer;
+  Timer? _stationStatusTimer;
+  bool _stationStatusRefreshInFlight = false;
   bool _isUsingCurrentLocation = true;
   Itinerary? _currentItinerary;
   Map<String, dynamic>? _currentRawItinerary;
@@ -369,6 +371,7 @@ class _MapViewState extends State<MapView> {
     _weatherDebounce?.cancel();
     _scrollCardDebounce?.cancel();
     _mapTapSuppressionTimer?.cancel();
+    _stationStatusTimer?.cancel();
     _placeSearchFocusNode.dispose();
     _placeSearchController.dispose();
     _httpClient.close();
@@ -997,6 +1000,12 @@ class _MapViewState extends State<MapView> {
         fromStopId: effectiveFromStopId,
         toStopId: effectiveToStopId,
       ),
+      drivingEstimate: _fetchTomTomTrafficEstimate(
+        fromLat: originLat,
+        fromLon: originLon,
+        toLat: destination.lat,
+        toLon: destination.lon,
+      ),
     );
   }
 
@@ -1282,6 +1291,7 @@ class _MapViewState extends State<MapView> {
     Map<String, dynamic>? routeData, {
     ValueChanged<Map<String, dynamic>>? onSelectItinerary,
     Future<Map<String, dynamic>?> Function()? refreshRoute,
+    Future<Map<String, dynamic>?>? drivingEstimate,
   }) async {
     if (routeData == null || routeData['itineraries'] is! List) return;
     final itineraries = (routeData['itineraries'] as List<dynamic>)
@@ -1463,6 +1473,7 @@ class _MapViewState extends State<MapView> {
               itineraries: itineraries,
               onSelectItinerary: onSelectItinerary ?? _applyItinerary,
               routesUpdated: routesUpdated,
+              drivingEstimate: drivingEstimate,
             );
           },
         ),
@@ -4607,6 +4618,65 @@ class _MapViewState extends State<MapView> {
     }
   }
 
+  Future<List<StationFacilityReport>> _fetchStopFacilityReports(
+    String stopId,
+  ) async {
+    final response = await _httpClient
+        .get(
+          Uri.parse(
+            '$_backendBaseUrl/api/stations/${Uri.encodeComponent(stopId)}/facility-reports',
+          ),
+          headers: await backendHeaders(),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw StateError('Could not load facility reports.');
+    }
+    final data = jsonDecode(response.body);
+    if (data is! Map || data['reports'] is! List) {
+      throw const FormatException('Invalid facility report response.');
+    }
+    return (data['reports'] as List)
+        .whereType<Map>()
+        .map(
+          (report) =>
+              StationFacilityReport.fromJson(Map<String, dynamic>.from(report)),
+        )
+        .toList();
+  }
+
+  Future<void> _submitFacilityReport(
+    TransitStop stop,
+    FacilityIssueSubmission submission,
+  ) async {
+    try {
+      final response = await _httpClient
+          .post(
+            Uri.parse('$_backendBaseUrl/api/station-facility-reports'),
+            headers: await backendHeaders(json: true),
+            body: jsonEncode({
+              'station_id': stop.id,
+              'station_name': stop.name,
+              'station_lat': stop.lat,
+              'station_lon': stop.lon,
+              'facility_type': submission.facilityType,
+              'issue_type': submission.issueType,
+              if (submission.comment != null) 'comment': submission.comment,
+              'reported_at': DateTime.now().toUtc().toIso8601String(),
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode != 202) {
+        throw StateError('Facility report was rejected');
+      }
+      _showMessage('Thanks — your anonymous facility report was submitted.');
+    } catch (_) {
+      _showMessage(
+        'Could not submit the report. Check your connection and try again.',
+      );
+    }
+  }
+
   Future<void> _askForNearbyStationChoice(Position position) async {
     if (!_stationLocationTrackingEnabled ||
         _isStationChoicePromptOpen ||
@@ -4973,6 +5043,9 @@ class _MapViewState extends State<MapView> {
               ? Future<TrafficCongestion?>.value(null)
               : _fetchTrafficCongestion(stopId, stop.lat, stop.lon),
           fetchIncidents: () => _fetchStopIncidents(stopId, stop),
+          fetchFacilityReports: () => _fetchStopFacilityReports(stopId),
+          submitFacilityReport: (submission) =>
+              _submitFacilityReport(stop!, submission),
         ),
       );
     } finally {
@@ -5067,10 +5140,15 @@ class _MapViewState extends State<MapView> {
       final route = raw['service_route']?.toString();
       final key = '${type.toLowerCase()}|${route?.toLowerCase() ?? ''}';
       final previous = grouped[key];
+      final comment = raw['comment']?.toString().trim();
       grouped[key] = StationIncident(
         type: type,
         route: route,
         count: (previous?.count ?? 0) + 1,
+        comments: [
+          ...?previous?.comments,
+          if (comment != null && comment.isNotEmpty) comment,
+        ],
       );
     }
     return grouped.values.toList();
@@ -5157,7 +5235,17 @@ class _MapViewState extends State<MapView> {
         "rail_stops_layer",
         const CircleLayerProperties(
           circleRadius: 7,
-          circleColor: '#FF9500',
+          circleColor: [
+            'match',
+            ['get', 'status_level'],
+            'high',
+            '#D92D20',
+            'medium',
+            '#F79009',
+            'low',
+            '#12B76A',
+            '#7A828E',
+          ],
           circleStrokeWidth: 1.5,
           circleStrokeColor: '#FFFFFF',
         ),
@@ -5173,7 +5261,17 @@ class _MapViewState extends State<MapView> {
         "transit_stops_layer",
         const CircleLayerProperties(
           circleRadius: 5,
-          circleColor: '#007FFF',
+          circleColor: [
+            'match',
+            ['get', 'status_level'],
+            'high',
+            '#D92D20',
+            'medium',
+            '#F79009',
+            'low',
+            '#12B76A',
+            '#7A828E',
+          ],
           circleStrokeWidth: 1.5,
           circleStrokeColor: '#FFFFFF',
         ),
@@ -5216,12 +5314,66 @@ class _MapViewState extends State<MapView> {
         ],
         minzoom: 14,
       );
+      _stationStatusTimer?.cancel();
+      unawaited(_refreshStationStatusSource(controller, geoJson));
+      _stationStatusTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+        unawaited(_refreshStationStatusSource(controller, geoJson));
+      });
     } on FormatException catch (error) {
       _showMessage('The transit-stop data is invalid.');
       debugPrint('Invalid transit-stop JSON: $error');
     } catch (error) {
       _showMessage('Could not load transit stops.');
       debugPrint('Transit-stop error: $error');
+    }
+  }
+
+  Future<void> _refreshStationStatusSource(
+    MapLibreMapController controller,
+    Map<String, dynamic> originalGeoJson,
+  ) async {
+    if (_stationStatusRefreshInFlight || _mapController != controller) return;
+    _stationStatusRefreshInFlight = true;
+    try {
+      final response = await _httpClient
+          .get(
+            Uri.parse('$_backendBaseUrl/api/stations/status'),
+            headers: await backendHeaders(),
+          )
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode != 200 || _mapController != controller) return;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['stations'] is! List) return;
+      final statuses = <String, String>{};
+      for (final row in decoded['stations'] as List) {
+        if (row is Map && row['stationId'] != null) {
+          final level = row['level']?.toString();
+          if (const {'low', 'medium', 'high'}.contains(level)) {
+            statuses[row['stationId'].toString()] = level!;
+          }
+        }
+      }
+      final updated = Map<String, dynamic>.from(originalGeoJson);
+      final features = (originalGeoJson['features'] as List? ?? const [])
+          .whereType<Map>()
+          .map((feature) {
+            final copy = Map<String, dynamic>.from(feature);
+            final properties = Map<String, dynamic>.from(
+              (feature['properties'] as Map?)?.cast<String, dynamic>() ??
+                  const {},
+            );
+            properties['status_level'] =
+                statuses[properties['id']?.toString()] ?? 'unavailable';
+            copy['properties'] = properties;
+            return copy;
+          })
+          .toList();
+      updated['features'] = features;
+      await controller.setGeoJsonSource('offline_stops_source', updated);
+    } catch (error) {
+      debugPrint('Station status refresh failed: $error');
+    } finally {
+      _stationStatusRefreshInFlight = false;
     }
   }
 
@@ -5886,7 +6038,38 @@ class _MapViewState extends State<MapView> {
           if (_currentItinerary == null) ...[
             if (hasSearchContent) const Divider(height: 1),
             _buildNearestStationCard(),
+            const Divider(height: 1),
+            _buildStationStatusLegend(),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStationStatusLegend() {
+    const statusColors = <(String, Color)>[
+      ('Low', Color(0xFF12B76A)),
+      ('Moderate', Color(0xFFF79009)),
+      ('High', Color(0xFFD92D20)),
+      ('No recent data', Color(0xFF7A828E)),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 6,
+        children: [
+          const Text('Station status', style: TextStyle(fontSize: 12)),
+          ...statusColors.map(
+            (status) => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.circle, size: 9, color: status.$2),
+                const SizedBox(width: 4),
+                Text(status.$1, style: const TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
         ],
       ),
     );

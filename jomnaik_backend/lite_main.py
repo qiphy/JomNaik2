@@ -6,6 +6,7 @@ on a small Railway/Render service and is non-essential to route availability.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import logging
@@ -90,6 +91,21 @@ class IncidentReport(BaseModel):
     report_type: str = Field(min_length=1, max_length=100)
     target_type: str = Field(pattern="^(bus|station)$")
     service_route: str | None = Field(default=None, max_length=100)
+    comment: str | None = Field(default=None, max_length=2000)
+    reported_at: str | None = None
+
+
+class FacilityIssueReport(BaseModel):
+    station_id: str = Field(min_length=1, max_length=255)
+    station_name: str = Field(min_length=1, max_length=255)
+    station_lat: float = Field(ge=-90, le=90)
+    station_lon: float = Field(ge=-180, le=180)
+    facility_type: str = Field(
+        pattern="^(lift|escalator|toilet|ticket_machine|entrance|lighting|other)$"
+    )
+    issue_type: str = Field(
+        pattern="^(out_of_service|blocked|damaged|unclean|other)$"
+    )
     comment: str | None = Field(default=None, max_length=2000)
     reported_at: str | None = None
 
@@ -570,7 +586,7 @@ async def recent_incidents(
                     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
                 },
                 params={
-                    "select": "station_id,station_name,station_lat,station_lon,report_type,target_type,service_route,reported_at",
+                    "select": "station_id,station_name,station_lat,station_lon,report_type,target_type,service_route,comment,reported_at",
                     "reported_at": f"gte.{since}",
                     "order": "reported_at.desc",
                     "limit": str(limit),
@@ -749,10 +765,10 @@ async def traffic_route(
 async def station_crowd(station_id: str) -> dict[str, Any]:
     """Estimate crowd level from recent anonymous station-presence reports."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        logger.warning("Crowd data is not configured; returning low fallback")
+        logger.warning("Crowd data is not configured")
         return {
             "stationId": station_id,
-            "level": "low",
+            "level": "unavailable",
             "observedUsers": 0,
             "capacity": None,
             "windowMinutes": 30,
@@ -794,7 +810,7 @@ async def station_crowd(station_id: str) -> dict[str, Any]:
         logger.exception("Could not read crowd data for station %s", station_id)
         return {
             "stationId": station_id,
-            "level": "low",
+            "level": "unavailable",
             "observedUsers": 0,
             "capacity": None,
             "windowMinutes": 30,
@@ -817,6 +833,132 @@ async def station_crowd(station_id: str) -> dict[str, Any]:
         "confidence": "low" if capacity is None else "medium",
         "available": True,
     }
+
+
+@app.get("/api/stations/status")
+async def station_statuses() -> dict[str, Any]:
+    """Aggregate recent crowding, incidents, and facility reports per stop."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return {"stations": [], "available": False}
+
+    now = datetime.now(timezone.utc)
+    presence_since = (now - timedelta(minutes=30)).isoformat()
+    reports_since = (now - timedelta(minutes=15)).isoformat()
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    async with httpx.AsyncClient(timeout=12) as client:
+        async def rows(table: str, select: str, date_column: str, since: str):
+            response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/{table}",
+                headers=headers,
+                params={
+                    "select": select,
+                    date_column: f"gte.{since}",
+                    "limit": "5000",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError(f"Invalid rows returned from {table}")
+            return payload
+
+        try:
+            presence, incidents, facilities, capacities = await asyncio.gather(
+                rows("anonymous_station_presence", "station_id", "observed_at", presence_since),
+                rows("anonymous_incident_reports", "station_id", "reported_at", reports_since),
+                rows("station_facility_reports", "station_id", "reported_at", reports_since),
+                rows("station_capacity", "station_id,capacity", "updated_at", "1970-01-01T00:00:00+00:00"),
+            )
+        except (httpx.HTTPError, ValueError) as error:
+            logger.warning("Could not build station status layer: %s", error)
+            raise HTTPException(503, "Station status is temporarily unavailable") from error
+
+    crowd_counts: dict[str, int] = {}
+    incident_counts: dict[str, int] = {}
+    facility_counts: dict[str, int] = {}
+    capacity_by_id: dict[str, int] = {}
+    for row in presence:
+        station_id = str(row.get("station_id", ""))
+        if station_id:
+            crowd_counts[station_id] = crowd_counts.get(station_id, 0) + 1
+    for row in incidents:
+        station_id = str(row.get("station_id", ""))
+        if station_id:
+            incident_counts[station_id] = incident_counts.get(station_id, 0) + 1
+    for row in facilities:
+        station_id = str(row.get("station_id", ""))
+        if station_id:
+            facility_counts[station_id] = facility_counts.get(station_id, 0) + 1
+    for row in capacities:
+        station_id, capacity = row.get("station_id"), row.get("capacity")
+        if station_id and isinstance(capacity, int) and capacity > 0:
+            capacity_by_id[str(station_id)] = capacity
+
+    station_ids = set(crowd_counts) | set(incident_counts) | set(facility_counts)
+    stations = []
+    for station_id in station_ids:
+        crowd_count = crowd_counts.get(station_id, 0)
+        capacity = capacity_by_id.get(station_id)
+        crowd_score = (
+            2 if crowd_count / capacity >= 0.7 else 1 if crowd_count / capacity >= 0.3 else 0
+        ) if capacity else (2 if crowd_count >= 10 else 1 if crowd_count >= 4 else 0)
+        incident_count = incident_counts.get(station_id, 0)
+        facility_count = facility_counts.get(station_id, 0)
+        score = max(
+            crowd_score,
+            2 if incident_count >= 3 or facility_count >= 3 else 1 if incident_count or facility_count else 0,
+        )
+        stations.append({
+            "stationId": station_id,
+            "level": ("high" if score == 2 else "medium" if score == 1 else "low"),
+            "crowdLevel": ("high" if crowd_score == 2 else "medium" if crowd_score == 1 else "low"),
+            "incidentCount": incident_count,
+            "facilityIssueCount": facility_count,
+            "observedUsers": crowd_count,
+            "available": True,
+        })
+    return {"stations": stations, "available": True, "asOf": now.isoformat()}
+
+
+@app.get("/api/stations/{station_id}/facility-reports")
+async def recent_facility_reports(station_id: str) -> dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(503, "Reporting storage is not configured")
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/station_facility_reports",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                params={
+                    "select": "facility_type,issue_type,comment,reported_at",
+                    "station_id": f"eq.{station_id}",
+                    "reported_at": f"gte.{since}",
+                    "order": "reported_at.desc",
+                    "limit": "50",
+                },
+            )
+        if response.status_code != 200:
+            raise HTTPException(502, "Could not load facility reports")
+        reports = response.json()
+        if not isinstance(reports, list):
+            raise HTTPException(502, "Facility reports returned an invalid response")
+        return {"reports": reports}
+    except httpx.HTTPError as error:
+        raise HTTPException(503, "Facility reports are temporarily unavailable") from error
+
+
+@app.post("/api/station-facility-reports", status_code=202)
+async def create_facility_report(report: FacilityIssueReport) -> dict[str, str]:
+    body = report.model_dump(exclude_none=True)
+    await _insert("station_facility_reports", body)
+    return {"status": "accepted"}
 
 
 @app.post("/api/station-presence", status_code=202)
