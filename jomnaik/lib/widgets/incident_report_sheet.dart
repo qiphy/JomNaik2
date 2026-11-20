@@ -174,6 +174,33 @@ class _FacilityIssueReportSheetState extends State<FacilityIssueReportSheet> {
   );
 }
 
+/// Shows [IncidentTypeSelectionSheet] above the map.
+///
+/// The sheet has a comment field, so the modal must be scroll-controlled and
+/// safe-area aware. A plain modal is capped at 9/16 of the screen height, and
+/// with the keyboard open its scrollable area collapses to 10-70dp, which
+/// hides the comment field and every category row.
+Future<IncidentReportSubmission?> showIncidentTypeSheet(
+  BuildContext context, {
+  required bool isBusStop,
+  required String stopName,
+  double? distance,
+  String? affectedRoute,
+}) {
+  return showModalBottomSheet<IncidentReportSubmission>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) => IncidentTypeSelectionSheet(
+      isBusStop: isBusStop,
+      stopName: stopName,
+      distance: distance,
+      affectedRoute: affectedRoute,
+    ),
+  );
+}
+
 class IncidentTypeSelectionSheet extends StatefulWidget {
   const IncidentTypeSelectionSheet({
     super.key,

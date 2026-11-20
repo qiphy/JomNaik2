@@ -4570,14 +4570,11 @@ class _MapViewState extends State<MapView> {
     }
     if (!mounted) return;
 
-    final submission = await showModalBottomSheet<IncidentReportSubmission>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => IncidentTypeSelectionSheet(
-        isBusStop: isBusStop,
-        stopName: stop.name,
-        affectedRoute: affectedRoute,
-      ),
+    final submission = await showIncidentTypeSheet(
+      context,
+      isBusStop: isBusStop,
+      stopName: stop.name,
+      affectedRoute: affectedRoute,
     );
     if (submission == null) return;
     final report = submission.type;
@@ -6150,6 +6147,10 @@ class _MapViewState extends State<MapView> {
         // Keep the itinerary viewport below the search bar so its top rows
         // remain visible and scrollable on small screens.
         extendBodyBehindAppBar: isMapTab && !itineraryIsOpen,
+        // On the idle map the search field is in the app bar, above the
+        // keyboard, so there is nothing to avoid. Resizing would shrink the
+        // native map and drag the control column onto the search results.
+        resizeToAvoidBottomInset: !isMapTab || itineraryIsOpen,
         appBar: AppBar(
           automaticallyImplyLeading: false,
           toolbarHeight: isMapTab ? 64 : null,
@@ -6360,7 +6361,11 @@ class _MapViewState extends State<MapView> {
                             ),
                           if (_currentItinerary == null)
                             Positioned(
-                              top: 66,
+                              // The map tab extends behind a transparent app bar,
+                              // so clear the status-bar inset as well as the
+                              // search bar. A fixed 66 overlapped the bar by
+                              // 14dp on Android and 49dp on a Dynamic Island.
+                              top: MediaQuery.paddingOf(context).top + 66,
                               left: 16,
                               right: 16,
                               child: NotificationListener<ScrollNotification>(
@@ -6451,9 +6456,20 @@ class _MapViewState extends State<MapView> {
                                         unobscuredMapHeight - 72,
                                         math.max(80.0, sheetTop - 68),
                                       );
+                                // The keyboard and the search results list both
+                                // cover the area the control column floats in.
+                                // The keyboard test relies on the Scaffold's
+                                // resizeToAvoidBottomInset being false here;
+                                // otherwise it strips the inset from the body.
+                                final searchCoversControls =
+                                    MediaQuery.viewInsetsOf(context).bottom >
+                                        0 ||
+                                    (_isSearchOpen &&
+                                        _placeSearchResults.isNotEmpty);
                                 return Stack(
                                   children: [
-                                    if (_currentItinerary == null)
+                                    if (_currentItinerary == null &&
+                                        !searchCoversControls)
                                       AnimatedPositioned(
                                         duration: const Duration(
                                           milliseconds: 180,
@@ -6651,7 +6667,10 @@ class _MapViewState extends State<MapView> {
                                           ),
                                         ),
                                       ),
-                                    if (_canReportIncident)
+                                    // An expanded itinerary sheet reaches the top of
+                                    // the screen, and this button would cover its
+                                    // title and first rows.
+                                    if (_canReportIncident && !_isCardExpanded)
                                       AnimatedPositioned(
                                         duration: const Duration(
                                           milliseconds: 180,
